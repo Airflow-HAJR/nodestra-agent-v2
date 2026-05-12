@@ -1,4 +1,4 @@
-from main import graph
+from agent.graph import graph
 
 # Generate Mermaid PNG
 png_data = graph.get_graph().draw_mermaid_png()

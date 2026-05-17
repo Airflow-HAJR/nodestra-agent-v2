@@ -19,6 +19,10 @@ from agent.map_engine import (
     search_pois,
 )
 from agent.memory import search_memories
+from agent.moss_indexing import index_moss_flights as moss_index_flights
+from agent.moss_indexing import index_moss_pois as moss_index_pois
+from agent.moss_search import search_moss_flights as moss_semantic_search_flights
+from agent.moss_search import search_moss_pois as moss_semantic_search_pois
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +64,17 @@ class SearchUserMemoryInput(BaseModel):
         description="Natural language query describing what user preference or context to look up, "
                     "e.g. 'food preferences', 'payment cards and lounge access', 'mobility or accessibility needs'"
     )
+
+class SearchMossPoisInput(BaseModel):
+    query: str = Field(description="Semantic search query over the Oakland POI Moss index")
+
+
+class SearchMossFlightsInput(BaseModel):
+    query: str = Field(description="Semantic search query over the Oakland flights Moss index")
+
+
+class IndexMossInput(BaseModel):
+    airport_id: str = Field(default=DEFAULT_AIRPORT, description="Airport code to index, e.g. OAK")
 
 
 # ---------------------------------------------------------------------------
@@ -315,4 +330,54 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
     return result
 
 
-TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state, search_user_memory]
+@tool(args_schema=SearchMossPoisInput)
+def search_moss_pois(query: str) -> str:
+    """Semantic search only over the `oakland-pois` Moss index."""
+    top_k = 7
+    print(f"[TOOL] search_moss_pois query={query!r} top_k={top_k}")
+    result = moss_semantic_search_pois(query=query, top_k=top_k)
+    print(f"[MOSS] pois_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    return json.dumps(result, ensure_ascii=True)
+
+
+@tool(args_schema=SearchMossFlightsInput)
+def search_moss_flights(query: str) -> str:
+    """Semantic search only over the `oakland-flights` Moss index."""
+    top_k = 7
+    print(f"[TOOL] search_moss_flights query={query!r} top_k={top_k}")
+    result = moss_semantic_search_flights(query=query, top_k=top_k)
+    print(f"[MOSS] flights_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    return json.dumps(result, ensure_ascii=True)
+
+
+@tool(args_schema=IndexMossInput)
+def index_moss_pois(airport_id: str = DEFAULT_AIRPORT) -> str:
+    """Build or refresh the Moss POI index for the airport."""
+    print(f"[TOOL] index_moss_pois airport_id={airport_id!r}")
+    result = moss_index_pois(airport_id=airport_id)
+    print(f"[MOSS] poi_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    return json.dumps(result, ensure_ascii=True)
+
+
+@tool(args_schema=IndexMossInput)
+def index_moss_flights(airport_id: str = DEFAULT_AIRPORT) -> str:
+    """Build or refresh the Moss flight index for the airport."""
+    print(f"[TOOL] index_moss_flights airport_id={airport_id!r}")
+    result = moss_index_flights(airport_id=airport_id)
+    print(f"[MOSS] flight_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    return json.dumps(result, ensure_ascii=True)
+
+
+TOOLS = [
+    find_poi,
+    get_route,
+    get_nodes,
+    resolve_poi,
+    find_nearest,
+    set_nav_state,
+    search_user_memory,
+    search_moss_pois,
+    search_moss_flights,
+    index_moss_pois,
+    index_moss_flights,
+]

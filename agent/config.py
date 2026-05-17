@@ -9,6 +9,7 @@ DEFAULT_AIRPORT = "OAK"
 AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
 AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 
 # Supabase (map data)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -20,7 +21,3 @@ AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
 
 # Supermemory (persistent user personalization)
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")
-
-# Moss semantic search (optional)
-MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID")
-MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY")

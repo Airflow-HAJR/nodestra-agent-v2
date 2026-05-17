@@ -4,14 +4,18 @@ Everything that touches the database lives here.
 """
 from __future__ import annotations
 
+import threading
+import time
 from typing import Optional
 
 from supabase import Client, create_client
 
 from agent.config import SUPABASE_KEY, SUPABASE_URL
-from agent.moss import get_map_levels_cached, put_map_levels_cache
 
 _client: Optional[Client] = None
+_MAP_CACHE: dict[str, tuple[list[dict], float]] = {}
+_MAP_LOCK = threading.Lock()
+_MAP_TTL_SECONDS = 3600
 
 
 def get_client() -> Client:
@@ -56,8 +60,26 @@ def _slim_levels(rows: list[dict]) -> list[dict]:
     return levels
 
 
+def get_map_levels_cached(airport_id: str) -> Optional[list[dict]]:
+    with _MAP_LOCK:
+        entry = _MAP_CACHE.get(airport_id)
+        if entry and time.time() < entry[1]:
+            return entry[0]
+    return None
+
+
+def put_map_levels_cache(airport_id: str, levels: list[dict]) -> None:
+    with _MAP_LOCK:
+        _MAP_CACHE[airport_id] = (levels, time.time() + _MAP_TTL_SECONDS)
+
+
+def invalidate_map_cache(airport_id: str) -> None:
+    with _MAP_LOCK:
+        _MAP_CACHE.pop(airport_id, None)
+
+
 def load_map_levels(airport_id: str) -> list[dict]:
-    """Fetch map levels: L1 dict → moss → Supabase."""
+    """Fetch map levels: in-process cache -> Supabase."""
     cached = get_map_levels_cached(airport_id)
     if cached is not None:
         return cached

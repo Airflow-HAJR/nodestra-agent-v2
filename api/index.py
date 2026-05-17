@@ -35,7 +35,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 
-from agent.moss import invalidate_map_cache, index_airport_pois
+from agent.db import invalidate_map_cache
 
 load_dotenv()
 
@@ -389,16 +389,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.post("/update/{airport_id}")
 def update_map_cache(airport_id: str):
-    """Refresh map cache from Supabase and rebuild the moss POI search index."""
+    """Refresh map cache from Supabase."""
     from agent.db import load_map_levels
     invalidate_map_cache(airport_id)
     levels = load_map_levels(airport_id)
-    indexed = index_airport_pois(airport_id, levels)
     return {
         "airport_id": airport_id,
         "status": "updated",
         "levels": len(levels),
-        "pois_indexed": indexed,
     }
 
 
@@ -1476,5 +1474,4 @@ def subscribe_to_flight(body: FlightSubscription):
         "airport_id": body.airport_id,
     }).execute()
     return {"status": "subscribed", "flight": body.flight_number}
-
 

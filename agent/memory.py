@@ -5,22 +5,43 @@ from agent.config import SUPERMEMORY_API_KEY
 _client = Supermemory(api_key=SUPERMEMORY_API_KEY)
 
 
+def _value(obj, key: str, default=None):
+    """Read a key from either a dict-like result or an SDK object."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 def search_memories(user_id: str, query: str) -> str:
     """Query Supermemory for user context relevant to the given query."""
     try:
-        profile = _client.profile(container_tag=user_id, q=query)
-
         parts = []
 
+        # Static/dynamic user profile (no query needed)
+        profile = _client.profile(container_tag=user_id)
         static = getattr(getattr(profile, "profile", None), "static", []) or []
         dynamic = getattr(getattr(profile, "profile", None), "dynamic", []) or []
-        results = getattr(getattr(profile, "search_results", None), "results", []) or []
-
         if static:
             parts.append("Known about this user:\n" + "\n".join(f"- {s}" for s in static))
         if dynamic:
             parts.append("Recent context:\n" + "\n".join(f"- {d}" for d in dynamic))
-        relevant = [r.get("memory", "") for r in results if r.get("memory")]
+
+        # Semantic search with limit + threshold
+        search_resp = _client.search.memories(
+            q=query,
+            container_tag=user_id,
+            search_mode="memories",
+            limit=5,
+            threshold=0.6,
+        )
+        results = getattr(search_resp, "results", []) or []
+        relevant = []
+        for r in results:
+            memory = _value(r, "memory", "")
+            if memory:
+                relevant.append(str(memory))
         if relevant:
             parts.append("Relevant memories:\n" + "\n".join(f"- {m}" for m in relevant))
 

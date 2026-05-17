@@ -310,7 +310,9 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
     if not user_id:
         return "No user identity available — cannot retrieve personalized memories."
     print(f"[TOOL] search_user_memory query={query!r} user={user_id}")
-    return search_memories(user_id, query)
+    result = search_memories(user_id, query)
+    print(f"[MEMORY] result:\n{result}")
+    return result
 
 
 TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state, search_user_memory]

@@ -17,7 +17,7 @@ def _value(obj, key: str, default=None):
 
 def _sanitize_container_tag(raw: str) -> str:
     """Normalize Supermemory container tags to allowed characters."""
-    tag = (raw or "").strip()
+    tag = (raw or "").strip().lstrip("+")
     # Supermemory expects: alphanumeric, underscore, hyphen, colon
     tag = re.sub(r"[^a-zA-Z0-9_:-]", "", tag)
     return tag
@@ -49,6 +49,113 @@ def search_memories(user_id: str, query: str) -> str:
     except Exception as e:
         print(f"[MEMORY] search failed: {e}")
         return "No relevant user memories found."
+
+
+def _location_custom_id(container_tag: str) -> str:
+    return f"location:{container_tag}"
+
+
+def _flight_custom_id(container_tag: str) -> str:
+    return f"flight:{container_tag}"
+
+
+def get_last_location(user_id: str) -> str | None:
+    """Return the last known POI id for this user, or None if not stored."""
+    try:
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            return None
+        custom_id = _location_custom_id(container_tag)
+        resp = _client.documents.list(
+            container_tags=[container_tag],
+            include_content=True,
+        )
+        docs = getattr(resp, "memories", []) or []
+        for doc in docs:
+            if _value(doc, "custom_id", None) == custom_id:
+                content = _value(doc, "content", "") or ""
+                for line in content.splitlines():
+                    if line.startswith("poi_id:"):
+                        return line[len("poi_id:"):].strip()
+        return None
+    except Exception as e:
+        print(f"[MEMORY] get_last_location failed: {e}")
+        return None
+
+
+def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
+    """Upsert the user's current location as a Supermemory dynamic document."""
+    try:
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            return
+        custom_id = _location_custom_id(container_tag)
+        content = f"poi_id:{poi_id}\npoi_name:{poi_name}"
+        # Find existing location doc by custom_id and update it; otherwise create one.
+        resp = _client.documents.list(
+            container_tags=[container_tag],
+            include_content=True,
+        )
+        docs = getattr(resp, "memories", []) or []
+        for doc in docs:
+            if _value(doc, "custom_id", None) == custom_id:
+                doc_id = _value(doc, "id", None)
+                if doc_id:
+                    _client.documents.update(id=doc_id, content=content)
+                    print(f"[MEMORY] location updated → {poi_id} for {container_tag}")
+                    return
+        _client.documents.add(
+            content=content,
+            container_tag=container_tag,
+            custom_id=custom_id,
+        )
+        print(f"[MEMORY] location created → {poi_id} for {container_tag}")
+    except Exception as e:
+        print(f"[MEMORY] update_location failed: {e}")
+
+
+def get_last_flight(user_id: str) -> str | None:
+    """Return the last known flight number for this user, or None if not stored."""
+    try:
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            return None
+        custom_id = _flight_custom_id(container_tag)
+        resp = _client.documents.list(container_tags=[container_tag], include_content=True)
+        docs = getattr(resp, "memories", []) or []
+        for doc in docs:
+            if _value(doc, "custom_id", None) == custom_id:
+                content = _value(doc, "content", "") or ""
+                for line in content.splitlines():
+                    if line.startswith("flight_number:"):
+                        return line[len("flight_number:"):].strip()
+        return None
+    except Exception as e:
+        print(f"[MEMORY] get_last_flight failed: {e}")
+        return None
+
+
+def update_flight(user_id: str, flight_number: str) -> None:
+    """Upsert the user's current flight number as a Supermemory dynamic document."""
+    try:
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            return
+        custom_id = _flight_custom_id(container_tag)
+        content = f"flight_number:{flight_number}"
+        resp = _client.documents.list(container_tags=[container_tag], include_content=True)
+        docs = getattr(resp, "memories", []) or []
+        for doc in docs:
+            if _value(doc, "custom_id", None) == custom_id:
+                doc_id = _value(doc, "id", None)
+                if doc_id:
+                    _client.documents.update(id=doc_id, content=content)
+                    print(f"[MEMORY] flight updated → {flight_number} for {container_tag}")
+                    return
+        _client.documents.add(content=content, container_tag=container_tag, custom_id=custom_id)
+        print(f"[MEMORY] flight created → {flight_number} for {container_tag}")
+    except Exception as e:
+        print(f"[MEMORY] update_flight failed: {e}")
 
 
 def save_conversation(user_id: str, messages: list) -> None:

@@ -9,7 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.llm import build_llm
-from agent.memory import save_conversation
+from agent.memory import get_last_flight, get_last_location, save_conversation
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.timing import add_llm, add_tool
@@ -226,6 +226,27 @@ def _closure_node(state: State) -> dict:
     return {}
 
 
+# ================= init (location pre-load) =================
+
+def _init_node(state: State) -> dict:
+    """At conversation start, restore the user's last known location and flight from Supermemory."""
+    user_id = state.get("user_id")
+    if not user_id:
+        return {}
+    result: dict = {}
+    if not state.get("current_location"):
+        poi_id = get_last_location(user_id)
+        if poi_id:
+            print(f"[INIT] restored location from Supermemory: {poi_id}")
+            result["current_location"] = poi_id
+    if not state.get("flight_number"):
+        flight = get_last_flight(user_id)
+        if flight:
+            print(f"[INIT] restored flight from Supermemory: {flight}")
+            result["flight_number"] = flight
+    return result
+
+
 # ================= main graph =================
 
 def _entry_router(state: State) -> Literal["clarify", "navigate"]:
@@ -239,11 +260,13 @@ def build_graph():
     navigate = _build_subgraph("navigate")
 
     builder = StateGraph(State)
+    builder.add_node("init", _init_node)
     builder.add_node("clarify", clarify)
     builder.add_node("navigate", navigate)
     builder.add_node("closure", _closure_node)
 
-    builder.add_conditional_edges(START, _entry_router, {"clarify": "clarify", "navigate": "navigate"})
+    builder.add_edge(START, "init")
+    builder.add_conditional_edges("init", _entry_router, {"clarify": "clarify", "navigate": "navigate"})
 
     builder.add_edge("clarify", "closure")
     builder.add_edge("navigate", "closure")

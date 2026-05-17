@@ -18,7 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.memory import search_memories
+from agent.memory import get_last_location, get_last_flight, search_memories, update_flight, update_location
 from agent.moss_indexing import index_moss_flights as moss_index_flights
 from agent.moss_indexing import index_moss_pois as moss_index_pois
 from agent.moss_search import search_moss_flights as moss_semantic_search_flights
@@ -224,8 +224,15 @@ def get_nodes(airport_id: str = DEFAULT_AIRPORT, floor: Optional[str] = None):
 
 
 @tool(args_schema=FindNearestInput)
-def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT):
+def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Find the closest POI of a given type from a source location."""
+    # Refresh source from Supermemory dynamic profile so detours always use the latest location.
+    user_id = state.get("user_id") if state else None
+    if user_id:
+        fresh = get_last_location(user_id)
+        if fresh and fresh != source:
+            print(f"[TOOL] find_nearest refreshed source {source!r} → {fresh!r} from Supermemory")
+            source = fresh
     print(f"[TOOL] find_nearest source={source!r} type={poi_type!r}")
     t0 = time.time()
 
@@ -280,6 +287,7 @@ def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT):
 @tool
 def set_nav_state(
     tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[dict, InjectedState],
     final_destination: Optional[str] = None,
     current_location: Optional[str] = None,
 ) -> Command:
@@ -289,9 +297,11 @@ def set_nav_state(
     Pass POI ids (e.g. 'gate-J292'), not raw names. Pass only the field(s) that changed.
     """
     print(f"[TOOL] set_nav_state final={final_destination!r} current={current_location!r}")
+    t0 = time.time()
 
     levels = load_map_levels(DEFAULT_AIRPORT)
-    valid_ids = {p["id"] for lvl in levels for p in lvl["pois"]}
+    poi_by_id = {p["id"]: p for lvl in levels for p in lvl["pois"]}
+    valid_ids = set(poi_by_id)
 
     errors = []
     if final_destination is not None and final_destination not in valid_ids:
@@ -304,17 +314,46 @@ def set_nav_state(
         print(f"[TOOL] set_nav_state validation failed: {msg}")
         return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
 
-    update: dict = {"messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)]}
+    nav_update: dict = {"messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)]}
     if final_destination is not None:
-        update["final_destination"] = final_destination
+        nav_update["final_destination"] = final_destination
     if current_location is not None:
-        update["current_location"] = current_location
-    return Command(update=update)
+        nav_update["current_location"] = current_location
+        user_id = state.get("user_id")
+        if user_id:
+            poi = poi_by_id.get(current_location, {})
+            poi_name = poi.get("name") or current_location
+            update_location(user_id, current_location, poi_name)
+    print(f"  -> set_nav_state in {time.time() - t0:.2f}s")
+    return Command(update=nav_update)
 
 
 # ---------------------------------------------------------------------------
 # Memory tool (Supermemory — personalization)
 # ---------------------------------------------------------------------------
+
+class SetFlightInput(BaseModel):
+    flight_number: str = Field(description="The user's flight number, e.g. 'UA 2345' or 'SW 891'")
+
+
+@tool
+def set_flight_number(
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[dict, InjectedState],
+    flight_number: str,
+) -> Command:
+    """Save the user's flight number to state and Supermemory so it persists across conversations."""
+    print(f"[TOOL] set_flight_number flight={flight_number!r}")
+    t0 = time.time()
+    user_id = state.get("user_id")
+    if user_id:
+        update_flight(user_id, flight_number)
+    print(f"  -> set_flight_number in {time.time() - t0:.2f}s")
+    return Command(update={
+        "flight_number": flight_number,
+        "messages": [ToolMessage(content=f"Flight number set to {flight_number}", tool_call_id=tool_call_id)],
+    })
+
 
 @tool(args_schema=SearchUserMemoryInput)
 def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str:
@@ -325,7 +364,9 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
     if not user_id:
         return "No user identity available — cannot retrieve personalized memories."
     print(f"[TOOL] search_user_memory query={query!r} user={user_id}")
+    t0 = time.time()
     result = search_memories(user_id, query)
+    print(f"  -> search_user_memory in {time.time() - t0:.2f}s")
     print(f"[MEMORY] result:\n{result}")
     return result
 
@@ -335,7 +376,9 @@ def search_moss_pois(query: str) -> str:
     """Semantic search only over the `oakland-pois` Moss index."""
     top_k = 7
     print(f"[TOOL] search_moss_pois query={query!r} top_k={top_k}")
+    t0 = time.time()
     result = moss_semantic_search_pois(query=query, top_k=top_k)
+    print(f"  -> search_moss_pois in {time.time() - t0:.2f}s")
     print(f"[MOSS] pois_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
     return json.dumps(result, ensure_ascii=True)
 
@@ -345,7 +388,9 @@ def search_moss_flights(query: str) -> str:
     """Semantic search only over the `oakland-flights` Moss index."""
     top_k = 7
     print(f"[TOOL] search_moss_flights query={query!r} top_k={top_k}")
+    t0 = time.time()
     result = moss_semantic_search_flights(query=query, top_k=top_k)
+    print(f"  -> search_moss_flights in {time.time() - t0:.2f}s")
     print(f"[MOSS] flights_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
     return json.dumps(result, ensure_ascii=True)
 
@@ -354,7 +399,9 @@ def search_moss_flights(query: str) -> str:
 def index_moss_pois(airport_id: str = DEFAULT_AIRPORT) -> str:
     """Build or refresh the Moss POI index for the airport."""
     print(f"[TOOL] index_moss_pois airport_id={airport_id!r}")
+    t0 = time.time()
     result = moss_index_pois(airport_id=airport_id)
+    print(f"  -> index_moss_pois in {time.time() - t0:.2f}s")
     print(f"[MOSS] poi_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
     return json.dumps(result, ensure_ascii=True)
 
@@ -363,7 +410,9 @@ def index_moss_pois(airport_id: str = DEFAULT_AIRPORT) -> str:
 def index_moss_flights(airport_id: str = DEFAULT_AIRPORT) -> str:
     """Build or refresh the Moss flight index for the airport."""
     print(f"[TOOL] index_moss_flights airport_id={airport_id!r}")
+    t0 = time.time()
     result = moss_index_flights(airport_id=airport_id)
+    print(f"  -> index_moss_flights in {time.time() - t0:.2f}s")
     print(f"[MOSS] flight_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
     return json.dumps(result, ensure_ascii=True)
 
@@ -375,6 +424,7 @@ TOOLS = [
     resolve_poi,
     find_nearest,
     set_nav_state,
+    set_flight_number,
     search_user_memory,
     search_moss_pois,
     search_moss_flights,

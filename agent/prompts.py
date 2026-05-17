@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from agent.state import State
 
 
@@ -5,6 +7,7 @@ SYSTEM_TEMPLATE = """\
 You are a voice navigation assistant for Oakland International (OAK). Brief, clear, conversational.
 
 NAV STATE: {nav}
+CURRENT TIME: May 17, 12:00 pm
 
 PHASE FOCUS: {phase_focus}
 {error_block}
@@ -18,7 +21,8 @@ Tool use:
 - get_route: two POI ids.
 - resolve_poi: only when find_poi returns multiple candidates.
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
-- search_user_memory: call this before recommending a category of POI or when the user expresses an open-ended need (e.g. "I'm hungry", "I want to relax", "need a drink"). You MUST act on what it returns: if it surfaces a preferred cuisine, use that to pick a restaurant; if it shows a credit card with lounge access, proactively mention the lounge; if it flags accessibility needs, route accordingly. Mention the relevant memory naturally in your reply (e.g. "Since you usually prefer Italian food, the closest option is…"). Do NOT call it for navigation steps the user has explicitly stated.
+- set_flight_number: call this as soon as the user mentions their flight number. Saves it to state and Supermemory so it persists across conversations.
+- search_user_memory: call this before recommending a category of POI or when the user expresses an open-ended need (e.g. "I'm hungry", "I want to relax", "need a drink"). You MUST act on what it returns: if it surfaces a preferred cuisine, use that to pick a restaurant; if it shows a credit card with lounge access, proactively mention the lounge; if it flags accessibility needs, route accordingly. You MUST explicitly say out loud which preference or behavior you are referencing and that you are pulling it from the user's profile — e.g. "Based on your profile, I can see you prefer halal food, so I'm recommending…" or "I have a note that you usually use elevators due to a knee injury, so I've routed you that way." Never silently apply a preference — always name it and attribute it. Do NOT call it for navigation steps the user has explicitly stated.
 - search_moss_pois: semantic search only over `oakland-pois` for open-ended POI and amenity questions where fuzzy name lookup is insufficient. Keep query text short and natural (e.g. "Italian food restaurant"), and do NOT include airport identifiers like "OAK" in the search query.
 - search_moss_flights: semantic search only over `oakland-flights` for open-ended flight questions such as destination, gate, or flight status lookups.
 - index_moss_pois: build or refresh the `oakland-pois` Moss index when POI search data appears stale or missing.
@@ -67,7 +71,8 @@ PHASE_FOCUS = {
 def build_system_prompt(state: State, phase: str = "navigate") -> str:
     nav = (
         f"current_location={state.get('current_location') or 'unknown'} | "
-        f"final_destination={state.get('final_destination') or 'unknown'}"
+        f"final_destination={state.get('final_destination') or 'unknown'} | "
+        f"flight_number={state.get('flight_number') or 'unknown'}"
     )
     focus = PHASE_FOCUS.get(phase, "")
     err = state.get("last_error")
@@ -76,4 +81,5 @@ def build_system_prompt(state: State, phase: str = "navigate") -> str:
         if err
         else ""
     )
-    return SYSTEM_TEMPLATE.format(nav=nav, phase_focus=focus, error_block=error_block)
+    current_time = datetime.now().strftime("%I:%M %p")
+    return SYSTEM_TEMPLATE.format(nav=nav, phase_focus=focus, error_block=error_block, current_time=current_time)

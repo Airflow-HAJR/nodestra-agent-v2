@@ -1,0 +1,27 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+DEFAULT_AIRPORT = "OAK"
+
+# Azure OpenAI
+AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
+AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
+AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+
+# Supabase (map data)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+# AgentPhone
+AGENTPHONE_API_KEY = os.environ.get("AGENTPHONE_API_KEY")
+AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
+
+# Checkpointing: PostgreSQL URL takes priority, otherwise SQLite
+CHECKPOINTER_URL = os.environ.get("CHECKPOINTER_URL")
+CHECKPOINTER_DB = os.environ.get("CHECKPOINTER_DB", "./checkpoints.db")
+
+# Moss semantic search (optional)
+MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID")
+MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY")

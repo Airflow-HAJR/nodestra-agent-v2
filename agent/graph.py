@@ -15,11 +15,40 @@ from agent.state import State
 from agent.timing import add_llm, add_tool
 from agent.tools import TOOLS
 
-_EARLY_SPEAK_MESSAGES = [
+_TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
+    "get_route": [
+        "Calculating the best route for you.",
+        "Finding the fastest way to get there.",
+        "Mapping your route now.",
+    ],
+    "find_poi": [
+        "Looking that up on the map.",
+        "Searching for that location.",
+        "Finding that spot for you.",
+    ],
+    "find_nearest": [
+        "Finding the closest one nearby.",
+        "Searching what's closest to you.",
+        "Looking for the nearest option.",
+    ],
+    "resolve_poi": [
+        "Let me figure out which one you mean.",
+        "Checking which floor that's on.",
+    ],
+    "search_user_memory": [
+        "Let me check your preferences.",
+        "Looking up what I know about you.",
+    ],
+    "get_nodes": [
+        "Pulling up the airport map.",
+        "Loading the map for you.",
+    ],
+    "set_nav_state": [],  # silent — just a state update
+}
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "search_user_memory", "get_nodes"]
+_FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",
-    "Checking the airport map now.",
-    "I'll help you find that.",
 ]
 _EARLY_SPEAK_IDX = 0
 _spoken_early_var: ContextVar[bool] = ContextVar("spoken_early", default=False)
@@ -117,14 +146,42 @@ def _repair_node(state: State):
 _tool_node = ToolNode(TOOLS, handle_tool_errors=True)
 
 
+def _pick_early_phrase(state: State) -> str | None:
+    global _EARLY_SPEAK_IDX
+    # Find which tools are about to run from the last AI message
+    tool_names: list[str] = []
+    for msg in reversed(state["messages"]):
+        calls = getattr(msg, "tool_calls", None)
+        if calls:
+            tool_names = [
+                (tc["name"] if isinstance(tc, dict) else tc.name) for tc in calls
+            ]
+            break
+
+    # Pick the highest-priority tool that has phrases
+    for tool_name in _TOOL_SPEAK_PRIORITY:
+        if tool_name in tool_names:
+            phrases = _TOOL_SPEAK_MESSAGES[tool_name]
+            if phrases:
+                phrase = phrases[_EARLY_SPEAK_IDX % len(phrases)]
+                _EARLY_SPEAK_IDX += 1
+                return phrase
+            return None  # tool explicitly silenced (set_nav_state)
+
+    # Fallback for unknown tools
+    phrase = _FALLBACK_SPEAK_MESSAGES[_EARLY_SPEAK_IDX % len(_FALLBACK_SPEAK_MESSAGES)]
+    _EARLY_SPEAK_IDX += 1
+    return phrase
+
+
 def _timed_tools(state: State):
-    global _EARLY_SPEAK_IDX, tools_running
+    global tools_running
 
     if not _spoken_early_var.get():
-        early_msg_text = _EARLY_SPEAK_MESSAGES[_EARLY_SPEAK_IDX % len(_EARLY_SPEAK_MESSAGES)]
-        _EARLY_SPEAK_IDX += 1
+        early_msg_text = _pick_early_phrase(state)
         _spoken_early_var.set(True)
-        speak_early(early_msg_text)
+        if early_msg_text:
+            speak_early(early_msg_text)
 
     tools_running = True
     t0 = time.time()

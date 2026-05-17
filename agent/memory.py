@@ -1,4 +1,5 @@
 from supermemory import Supermemory
+import re
 
 from agent.config import SUPERMEMORY_API_KEY
 
@@ -14,26 +15,26 @@ def _value(obj, key: str, default=None):
     return getattr(obj, key, default)
 
 
+def _sanitize_container_tag(raw: str) -> str:
+    """Normalize Supermemory container tags to allowed characters."""
+    tag = (raw or "").strip()
+    # Supermemory expects: alphanumeric, underscore, hyphen, colon
+    tag = re.sub(r"[^a-zA-Z0-9_:-]", "", tag)
+    return tag
+
+
 def search_memories(user_id: str, query: str) -> str:
-    """Query Supermemory for user context relevant to the given query."""
+    """Query Supermemory and return only semantically relevant memories."""
     try:
-        parts = []
-
-        # Static/dynamic user profile (no query needed)
-        profile = _client.profile(container_tag=user_id)
-        static = getattr(getattr(profile, "profile", None), "static", []) or []
-        dynamic = getattr(getattr(profile, "profile", None), "dynamic", []) or []
-        if static:
-            parts.append("Known about this user:\n" + "\n".join(f"- {s}" for s in static))
-        if dynamic:
-            parts.append("Recent context:\n" + "\n".join(f"- {d}" for d in dynamic))
-
-        # Semantic search with limit + threshold
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            return "No relevant user memories found."
+        # Semantic search with limit + threshold only (no profile dump)
         search_resp = _client.search.memories(
             q=query,
-            container_tag=user_id,
+            container_tag=container_tag,
             search_mode="memories",
-            limit=5,
+            limit=10,
             threshold=0.6,
         )
         results = getattr(search_resp, "results", []) or []
@@ -43,9 +44,8 @@ def search_memories(user_id: str, query: str) -> str:
             if memory:
                 relevant.append(str(memory))
         if relevant:
-            parts.append("Relevant memories:\n" + "\n".join(f"- {m}" for m in relevant))
-
-        return "\n\n".join(parts) if parts else "No relevant user memories found."
+            return "Relevant memories:\n" + "\n".join(f"- {m}" for m in relevant)
+        return "No relevant user memories found."
     except Exception as e:
         print(f"[MEMORY] search failed: {e}")
         return "No relevant user memories found."
@@ -68,7 +68,11 @@ def save_conversation(user_id: str, messages: list) -> None:
         return
 
     try:
-        _client.add(content="\n".join(lines), container_tag=user_id)
-        print(f"[MEMORY] saved {len(lines)} turns for user {user_id}")
+        container_tag = _sanitize_container_tag(user_id)
+        if not container_tag:
+            print("[MEMORY] save skipped: invalid empty container tag after sanitization")
+            return
+        _client.add(content="\n".join(lines), container_tag=container_tag)
+        print(f"[MEMORY] saved {len(lines)} turns for user {container_tag}")
     except Exception as e:
         print(f"[MEMORY] save failed: {e}")

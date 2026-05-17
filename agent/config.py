@@ -21,3 +21,7 @@ AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
 
 # Supermemory (persistent user personalization)
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")
+
+# Moss semantic search
+MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID", "")
+MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY", "")

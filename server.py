@@ -110,6 +110,9 @@ async def webhook(request: Request):
         logger.warning("Missing call ID in payload")
         raise HTTPException(status_code=400, detail="Missing call ID")
 
+    # Caller's phone number is the stable user identity across sessions
+    user_id = data.get("from") or None
+
     # Voice uses transcript (string); SMS uses message
     if channel == "voice":
         transcript = data.get("transcript", "")
@@ -126,10 +129,10 @@ async def webhook(request: Request):
     # Run through LangGraph — callId is thread_id for multi-turn continuity
     try:
         config = {"configurable": {"thread_id": call_id}}
-        result = graph.invoke(
-            {"messages": [HumanMessage(content=user_text)]},
-            config=config,
-        )
+        payload: dict = {"messages": [HumanMessage(content=user_text)]}
+        if user_id:
+            payload["user_id"] = user_id
+        result = graph.invoke(payload, config=config)
 
         messages = result.get("messages", [])
         if not messages:

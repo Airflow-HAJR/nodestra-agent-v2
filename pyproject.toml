@@ -12,10 +12,9 @@ dependencies = [
     "langchain>=1.2.18",
     "langgraph>=1.1.10",
     "psycopg[binary]>=3.1.0",
-    "pygraphviz>=1.14",
     "supabase>=2.0.0",
     "python-dotenv>=1.2.2",
     "requests>=2.33.1",
     "uvicorn>=0.34",
-    "moss>=0.1.0",
+    "supermemory>=0.1.0",
 ]

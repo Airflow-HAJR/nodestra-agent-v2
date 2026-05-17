@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.llm import build_llm
+from agent.memory import save_conversation
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.timing import add_llm, add_tool
@@ -31,6 +32,7 @@ _speak_early_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar
 # (AgentPhone etc.) can poll this to gate STT input.
 tools_running: bool = False
 
+
 def speak_early(text: str) -> None:
     callback = _speak_early_callback_var.get()
     if callback:
@@ -50,6 +52,7 @@ def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterato
 
 def reset_turn_state() -> None:
     _spoken_early_var.set(False)
+
 
 ITERATION_CAP = 30
 
@@ -113,6 +116,7 @@ def _repair_node(state: State):
 
 _tool_node = ToolNode(TOOLS, handle_tool_errors=True)
 
+
 def _timed_tools(state: State):
     global _EARLY_SPEAK_IDX, tools_running
 
@@ -150,12 +154,16 @@ def _build_subgraph(phase: str):
 
 _DECLINE_PHRASES = ("no thanks", "that's all", "i'm good", "bye", "goodbye", "no i'm set", "nope", "nah", "i'm set", "thank you", "thanks bye")
 
+
 def _closure_node(state: State) -> dict:
-    """Check if the user's latest message is a decline. If so, set should_end."""
+    """Check if the user's latest message is a decline. If so, save conversation and set should_end."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             lower = (msg.content if isinstance(msg.content, str) else str(msg.content)).lower().strip()
             if any(lower == p or lower.startswith(p) for p in _DECLINE_PHRASES):
+                user_id = state.get("user_id")
+                if user_id:
+                    save_conversation(user_id, state["messages"])
                 return {"should_end": True}
             break
     return {}
@@ -169,10 +177,6 @@ def _entry_router(state: State) -> Literal["clarify", "navigate"]:
     return "navigate"
 
 
-def _get_checkpointer():
-    return MemorySaver()
-
-
 def build_graph():
     clarify = _build_subgraph("clarify")
     navigate = _build_subgraph("navigate")
@@ -182,16 +186,13 @@ def build_graph():
     builder.add_node("navigate", navigate)
     builder.add_node("closure", _closure_node)
 
-    # Entry: route to clarify or navigate based on whether destination is known
     builder.add_conditional_edges(START, _entry_router, {"clarify": "clarify", "navigate": "navigate"})
 
-    # After each phase: check closure, then always END.
-    # Multi-turn is handled by the runner calling invoke() again with the same thread_id.
     builder.add_edge("clarify", "closure")
     builder.add_edge("navigate", "closure")
     builder.add_edge("closure", END)
 
-    return builder.compile(checkpointer=_get_checkpointer())
+    return builder.compile(checkpointer=MemorySaver())
 
 
 graph = build_graph()

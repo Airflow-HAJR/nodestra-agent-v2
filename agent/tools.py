@@ -5,6 +5,7 @@ from typing import Annotated, List, Optional
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId
+from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
+from agent.memory import search_memories
 
 
 # ---------------------------------------------------------------------------
@@ -29,8 +31,8 @@ class POIInput(BaseModel):
 
 
 class RouteInput(BaseModel):
-    start: str = Field(description="start POI id (the 'id' field returned by find_poi)")
-    end: str = Field(description="end POI id (the 'id' field returned by find_poi)")
+    start: str = Field(description="start POI id (the 'id' field returned by find_poi, e.g. 'gate-CIU3')")
+    end: str = Field(description="end POI id (the 'id' field returned by find_poi, e.g. 'lounge-MYAS')")
     airport_id: str = Field(default=DEFAULT_AIRPORT)
 
 
@@ -51,6 +53,13 @@ class FindNearestInput(BaseModel):
     source: str = Field(description="Source POI id to search from")
     poi_type: str = Field(description="Type of POI to find, e.g. 'restroom', 'gate', 'lounge'")
     airport_id: str = Field(default=DEFAULT_AIRPORT)
+
+
+class SearchUserMemoryInput(BaseModel):
+    query: str = Field(
+        description="Natural language query describing what user preference or context to look up, "
+                    "e.g. 'food preferences', 'payment cards and lounge access', 'mobility or accessibility needs'"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +112,6 @@ def resolve_poi(
 
     levels = load_map_levels(airport_id)
 
-    # If a floor hint was given, use it directly
     if floor:
         floor_lower = floor.lower()
         for c in candidates:
@@ -111,12 +119,10 @@ def resolve_poi(
                 print(f"  -> resolved by floor in {time.time() - t0:.2f}s")
                 return {"found": True, "id": c["id"], "name": c["name"], "type": c.get("type", ""), "level": c.get("level", "")}
 
-    # If no landmark, return the first candidate
     if not landmark:
         c = candidates[0]
         return {"found": True, "id": c["id"], "name": c["name"], "type": c.get("type", ""), "level": c.get("level", "")}
 
-    # Score each candidate by Dijkstra distance to the landmark
     lm_results = search_pois(levels, landmark)
     if not lm_results:
         c = candidates[0]
@@ -291,4 +297,22 @@ def set_nav_state(
     return Command(update=update)
 
 
-TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state]
+# ---------------------------------------------------------------------------
+# Memory tool (Supermemory — personalization)
+# ---------------------------------------------------------------------------
+
+@tool(args_schema=SearchUserMemoryInput)
+def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str:
+    """Look up persistent facts about this user: food preferences, payment cards, loyalty programs,
+    accessibility needs, lifestyle habits, and location patterns. Call this before recommending a
+    category of POI or when you want to personalize navigation for this user."""
+    user_id = state.get("user_id")
+    if not user_id:
+        return "No user identity available — cannot retrieve personalized memories."
+    print(f"[TOOL] search_user_memory query={query!r} user={user_id}")
+    result = search_memories(user_id, query)
+    print(f"[MEMORY] result:\n{result}")
+    return result
+
+
+TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state, search_user_memory]

@@ -417,21 +417,6 @@ wheels = [
 ]
 
 [[package]]
-name = "inferedge-moss-core"
-version = "0.11.0"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/52/58fe2ec9f297086b05535042fb7197ebd01faf003d3295703b362c19f597/inferedge_moss_core-0.11.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:eb6f8e556d9c4ca7d89b1bb6a6a452b44da40dc0978afbe3fa4d057f8d3f6fbf", size = 12151527, upload-time = "2026-05-08T00:27:44.955Z" },
-    { url = "https://files.pythonhosted.org/packages/93/81/44a6341437b2f113e1eb2f4dfd78e3d17b0f28cc6e4dca091953abc4ae5b/inferedge_moss_core-0.11.0-cp313-cp313-manylinux_2_38_x86_64.whl", hash = "sha256:bc817dd6ac67c540a6e619960594c4b86f660306f2adb4b6cfd297968253d17d", size = 13274523, upload-time = "2026-05-08T00:29:17.109Z" },
-    { url = "https://files.pythonhosted.org/packages/1e/a2/264813473c593130ac51b46db277a56f12c2c16f858c727ad25a3796a065/inferedge_moss_core-0.11.0-cp313-cp313-manylinux_2_39_aarch64.whl", hash = "sha256:2fe9f775884fb54bdb1e4dfd5728aebb918ab5da06f3a7cf04009909da9acd78", size = 14789528, upload-time = "2026-05-08T00:28:56.511Z" },
-    { url = "https://files.pythonhosted.org/packages/06/26/97fc463e4e44d8f090d7ed64a7cec7b6da16ab84532f92b966625bdbdab4/inferedge_moss_core-0.11.0-cp313-cp313-win_amd64.whl", hash = "sha256:7e4366f1b00b8ac7b3fc8e8bb3d02b33a8e557352ff0d87cf3d5ee4547116360", size = 11192865, upload-time = "2026-05-08T00:33:43.801Z" },
-    { url = "https://files.pythonhosted.org/packages/04/ba/4d5143455985a3f842295237c1d17c61884094495c34483ccfb28b50b91e/inferedge_moss_core-0.11.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:72dc9e747351da903882eefbbbb002fae240b23812d4c1e1db4a0c5b5fdce42d", size = 12152689, upload-time = "2026-05-08T00:28:19.785Z" },
-    { url = "https://files.pythonhosted.org/packages/e8/b6/319b11970b883fbf9a819b938f303d644a1ecaa797b68b81f684f4aec4ba/inferedge_moss_core-0.11.0-cp314-cp314-manylinux_2_38_x86_64.whl", hash = "sha256:3a5db60e328319edc2d0e6ebb4e0ef7acde0a491453daf49fb4dae4340a14c2d", size = 13274985, upload-time = "2026-05-08T00:29:19.599Z" },
-    { url = "https://files.pythonhosted.org/packages/04/51/0490b0f1ce2ea73b558d970cbb3c55df6707ac85f150dfb7b30b6d7ca47f/inferedge_moss_core-0.11.0-cp314-cp314-manylinux_2_39_aarch64.whl", hash = "sha256:795149de1ec32fd477c152a2d6ddb38e08f81c2cc9a4d2e4e36ee1860c799031", size = 14790225, upload-time = "2026-05-08T00:28:46.514Z" },
-    { url = "https://files.pythonhosted.org/packages/fd/b7/58a163ae1749cc386658dc523bf353e99b36d1daa729422951e4e3176125/inferedge_moss_core-0.11.0-cp314-cp314-win_amd64.whl", hash = "sha256:bf21d518c69d6244655792872c126905e139f929c8e9cd725db871589b1d68bb", size = 11196485, upload-time = "2026-05-08T00:33:11.716Z" },
-]
-
-[[package]]
 name = "ipykernel"
 version = "7.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -752,12 +737,11 @@ dependencies = [
     { name = "langchain" },
     { name = "langchain-openai" },
     { name = "langgraph" },
-    { name = "moss" },
     { name = "psycopg", extra = ["binary"] },
-    { name = "pygraphviz" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "supabase" },
+    { name = "supermemory" },
     { name = "uvicorn" },
 ]
 
@@ -769,12 +753,11 @@ requires-dist = [
     { name = "langchain", specifier = ">=1.2.18" },
     { name = "langchain-openai", specifier = ">=0.2.0" },
     { name = "langgraph", specifier = ">=1.1.10" },
-    { name = "moss", specifier = ">=0.1.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.1.0" },
-    { name = "pygraphviz", specifier = ">=1.14" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", specifier = ">=2.33.1" },
     { name = "supabase", specifier = ">=2.0.0" },
+    { name = "supermemory", specifier = ">=0.1.0" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
 
@@ -875,20 +858,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/21/54/1d71cd143752361c0aebef16ad3f55926a6faf7b112d355745c1f8a25f7f/mmh3-5.2.1-cp314-cp314t-win32.whl", hash = "sha256:29bc3973676ae334412efdd367fcd11d036b7be3efc1ce2407ef8676dabfeb82", size = 41934, upload-time = "2026-03-05T15:55:53.564Z" },
     { url = "https://files.pythonhosted.org/packages/9d/e4/63a2a88f31d93dea03947cccc2a076946857e799ea4f7acdecbf43b324aa/mmh3-5.2.1-cp314-cp314t-win_amd64.whl", hash = "sha256:28cfab66577000b9505a0d068c731aee7ca85cd26d4d63881fab17857e0fe1fb", size = 43036, upload-time = "2026-03-05T15:55:55.252Z" },
     { url = "https://files.pythonhosted.org/packages/a0/0f/59204bf136d1201f8d7884cfbaf7498c5b4674e87a4c693f9bde63741ce1/mmh3-5.2.1-cp314-cp314t-win_arm64.whl", hash = "sha256:dfd51b4c56b673dfbc43d7d27ef857dd91124801e2806c69bb45585ce0fa019b", size = 40391, upload-time = "2026-03-05T15:55:56.697Z" },
-]
-
-[[package]]
-name = "moss"
-version = "1.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "inferedge-moss-core" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/ee/9d/7705541c8514f15784d555786f9628689a269a7ee473d1803a9ad5494ae9/moss-1.1.0.tar.gz", hash = "sha256:cad07364bd2641f5d59b0e4f7eacc501e59d7264b4fe13e438298a2d8256cc71", size = 38538, upload-time = "2026-05-08T00:35:16.635Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/94/8ca1183f46af694509c050c3716e748e984df6a98a9c4b9291df27cc4d26/moss-1.1.0-py3-none-any.whl", hash = "sha256:a717dc5ee58b065608aff4c493d1f1fa1566b19a7651bd9dfc3cdaa8d42cc06e", size = 13874, upload-time = "2026-05-08T00:35:15.49Z" },
 ]
 
 [[package]]
@@ -1393,12 +1362,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pygraphviz"
-version = "1.14"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/66/ca/823d5c74a73d6b8b08e1f5aea12468ef334f0732c65cbb18df2a7f285c87/pygraphviz-1.14.tar.gz", hash = "sha256:c10df02377f4e39b00ae17c862f4ee7e5767317f1c6b2dfd04cea6acc7fc2bea", size = 106003, upload-time = "2024-09-29T18:31:12.471Z" }
-
-[[package]]
 name = "pyiceberg"
 version = "0.11.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1845,6 +1808,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f0/e6/5cd8559ec2bb332e6027840c1be292f9989c2fc7b47bf40800aec5586791/supabase_functions-2.30.0.tar.gz", hash = "sha256:025acfd25f1c000ba43d0f7b8e366b0d2e9dfc784b842528e21973eb33006113", size = 4683, upload-time = "2026-05-06T17:35:32.246Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/53/da/9dedab32775df04cc22ca72f194b78e895d940f195bed3e02882a65daa9b/supabase_functions-2.30.0-py3-none-any.whl", hash = "sha256:92419459f102767b954cd034856e4ded8e34c78660b32442d66c8b2899c68011", size = 8803, upload-time = "2026-05-06T17:35:31.342Z" },
+]
+
+[[package]]
+name = "supermemory"
+version = "3.42.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/71/45ae848720dbaf659667ce4594b32404ad1853411fb16230f8e0fd6dce2f/supermemory-3.42.0.tar.gz", hash = "sha256:86d75cf4d2bc47ecfdcee04c36d448880fc4fe9731685888835c868b320e0963", size = 172124, upload-time = "2026-05-12T03:48:06.078Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/69/05/6acee3ff5ca9ec92721e1a12b44b77d49970f3c6027e81690361b9911c9f/supermemory-3.42.0-py3-none-any.whl", hash = "sha256:1e5aa02a6f93a5d3cbdf56f26024f8e249bb72e2e6bc0815c2ffaf3ee0a1a612", size = 153446, upload-time = "2026-05-12T03:48:04.655Z" },
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ An AI airport navigation assistant that helps travelers find routes between gate
 - **Phone Integration** — Receive incoming calls via AgentPhone webhook
 - **Proactive Notifications** — Send gate change alerts via call or SMS
 - **Multi-turn Conversations** — Agent remembers your location across turns
+- **Personalized Memory** — Persistent user preferences via Supermemory
 - **Error Recovery** — Built-in repair logic for tool failures
 
 ## Setup

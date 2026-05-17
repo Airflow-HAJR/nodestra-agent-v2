@@ -1,17 +1,18 @@
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from pydantic import SecretStr
 
 from agent.config import (
     AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_API_VERSION,
     AZURE_OPENAI_DEPLOYMENT,
     AZURE_OPENAI_ENDPOINT,
 )
 
 
-def build_llm() -> ChatOpenAI:
-    return ChatOpenAI(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        base_url=AZURE_OPENAI_ENDPOINT.rstrip("/") + "/openai/v1/",
+def build_llm() -> AzureChatOpenAI:
+    return AzureChatOpenAI(
+        azure_deployment=AZURE_OPENAI_DEPLOYMENT,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
         api_key=SecretStr(AZURE_OPENAI_API_KEY),
-        default_query={"api-version": "preview"},
+        api_version=AZURE_OPENAI_API_VERSION,
     )

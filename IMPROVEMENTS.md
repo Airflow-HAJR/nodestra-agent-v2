@@ -95,33 +95,7 @@ CHECKPOINTER_URL=postgresql://user:password@localhost:5432/langgraph
 
 ---
 
-## 5. Latency Optimization with Moss.dev
-
-**What is Moss?**
-Moss provides real-time semantic search (<10ms) for conversational AI agents. It's ideal for:
-- Context retrieval without vector database latency
-- Voice agents (every millisecond matters)
-- Real-time conversation without external lookups
-
-**Integration (Optional):**
-```bash
-MOSS_API_KEY=your-moss-key
-MOSS_COLLECTION_ID=your-collection-id
-```
-
-**Use Case Example:**
-Instead of calling `find_poi` → wait for DB → return results, Moss can:
-1. Pre-index your airport POI database
-2. Return semantic search results in <10ms
-3. Eliminate the external API round-trip
-
-**Performance Impact:** 100-500ms saved per semantic search vs. traditional vector DB
-
-**Learn More:** [moss.dev](https://www.moss.dev/)
-
----
-
-## 6. Setup Script (`setup.sh`)
+## 5. Setup Script (`setup.sh`)
 
 **What It Does:**
 1. Creates `.env` from `.env.example` (with user prompt to edit)
@@ -158,8 +132,6 @@ python main.py
 | `CHECKPOINTER_DB` | SQLite database path | `./checkpoints.db` | |
 | `HTTP_POOL_CONNECTIONS` | HTTP pool base size | 10 | |
 | `HTTP_POOL_MAXSIZE` | HTTP pool max size | 20 | |
-| `MOSS_API_KEY` | Moss semantic search API | Optional | |
-| `MOSS_COLLECTION_ID` | Moss collection ID | Optional | |
 
 ---
 
@@ -170,9 +142,7 @@ python main.py
 | Remove closure LLM | 500-1000ms | Eliminates one LLM call per turn |
 | Connection pooling | 50-100ms | Per API request |
 | Persistent checkpointing | N/A | Enables state recovery |
-| Moss integration | 100-500ms | Per semantic search (optional) |
-
-**Total potential latency reduction:** 650-1600ms per turn (with Moss enabled)
+**Total potential latency reduction:** 550-1100ms per turn
 
 ---
 
@@ -188,11 +158,6 @@ python main.py
    python main.py
    ```
 
-3. **(Optional) Enable Moss:**
-   - Sign up at [moss.dev](https://www.moss.dev/)
-   - Add `MOSS_API_KEY` and `MOSS_COLLECTION_ID` to `.env`
-   - Update `prompts.py` to use Moss for POI retrieval
-
-4. **(Optional) Use PostgreSQL:**
+3. **(Optional) Use PostgreSQL:**
    - Set `CHECKPOINTER_URL` for production deployments
    - Enables distributed agent sessions

@@ -89,11 +89,12 @@ def _extract_response_text(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _graph_reply(user_text: str, thread_id: str) -> dict[str, Any]:
-    result = graph.invoke(
-        {"messages": [HumanMessage(content=user_text)]},
-        config=_build_graph_config(thread_id),
-    )
+def _graph_reply(user_text: str, thread_id: str, user_id: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
+    if user_id:
+        payload["user_id"] = user_id
+
+    result = graph.invoke(payload, config=_build_graph_config(thread_id))
 
     response_text = _extract_response_text(result)
     if not response_text:
@@ -106,7 +107,7 @@ def _graph_reply(user_text: str, thread_id: str) -> dict[str, Any]:
     return reply
 
 
-def _voice_webhook_stream(call_id: str, user_text: str) -> Iterator[bytes]:
+def _voice_webhook_stream(call_id: str, user_text: str, user_id: str | None = None) -> Iterator[bytes]:
     payloads: queue.Queue[dict[str, Any] | object] = queue.Queue()
     interim_sent = threading.Event()
 
@@ -123,7 +124,7 @@ def _voice_webhook_stream(call_id: str, user_text: str) -> Iterator[bytes]:
         try:
             timing.reset()
             with bind_speak_early_callback(emit_interim):
-                emit(_graph_reply(user_text, call_id))
+                emit(_graph_reply(user_text, call_id, user_id))
         except GraphRecursionError:
             emit({"text": "I'm getting a bit turned around. Could you re-state what you need?"})
         except Exception as e:
@@ -193,6 +194,9 @@ async def webhook(request: Request):
         logger.warning("Missing call ID in payload")
         raise HTTPException(status_code=400, detail="Missing call ID")
 
+    # Caller's phone number is the stable user identity across sessions
+    user_id = data.get("from") or None
+
     # Voice uses transcript (string); SMS uses message
     if channel == "voice":
         transcript = data.get("transcript", "")
@@ -208,14 +212,14 @@ async def webhook(request: Request):
 
     if channel == "voice":
         return StreamingResponse(
-            _voice_webhook_stream(call_id, user_text),
+            _voice_webhook_stream(call_id, user_text, user_id),
             media_type="application/x-ndjson",
         )
 
     timing.reset()
 
     try:
-        return _graph_reply(user_text, call_id)
+        return _graph_reply(user_text, call_id, user_id)
     except GraphRecursionError:
         return {"text": "I'm getting a bit turned around. Could you re-state what you need?"}
     except Exception as e:

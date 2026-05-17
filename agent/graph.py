@@ -1,4 +1,3 @@
-import os
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -171,22 +170,6 @@ def _entry_router(state: State) -> Literal["clarify", "navigate"]:
 
 
 def _get_checkpointer():
-    db_url = os.getenv("CHECKPOINTER_URL")
-    if db_url and db_url.startswith("postgresql://"):
-        try:
-            from langgraph.checkpoint.postgres import PostgresSaver
-            return PostgresSaver.from_conn_string(db_url)
-        except ImportError:
-            print("[WARN] langgraph-checkpoint-postgres not installed, falling back to memory")
-
-    db_path = os.getenv("CHECKPOINTER_DB")
-    if db_path:
-        try:
-            from langgraph.checkpoint.sqlite import SqliteSaver
-            return SqliteSaver(db_path)
-        except ImportError:
-            print("[WARN] langgraph-checkpoint-sqlite not installed, falling back to memory")
-
     return MemorySaver()
 
 

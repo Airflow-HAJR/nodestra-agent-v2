@@ -268,6 +268,21 @@ def set_nav_state(
     Pass POI ids (e.g. 'gate-J292'), not raw names. Pass only the field(s) that changed.
     """
     print(f"[TOOL] set_nav_state final={final_destination!r} current={current_location!r}")
+
+    levels = load_map_levels(DEFAULT_AIRPORT)
+    valid_ids = {p["id"] for lvl in levels for p in lvl["pois"]}
+
+    errors = []
+    if final_destination is not None and final_destination not in valid_ids:
+        errors.append(f"'{final_destination}' is not a valid POI id — call find_poi first to get the id, then pass the 'id' field here.")
+    if current_location is not None and current_location not in valid_ids:
+        errors.append(f"'{current_location}' is not a valid POI id — call find_poi first to get the id, then pass the 'id' field here.")
+
+    if errors:
+        msg = "Error: " + " | ".join(errors)
+        print(f"[TOOL] set_nav_state validation failed: {msg}")
+        return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
+
     update: dict = {"messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)]}
     if final_destination is not None:
         update["final_destination"] = final_destination

@@ -3,14 +3,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-BASE_URL = "https://airflowbackendv2-production.up.railway.app"
 DEFAULT_AIRPORT = "OAK"
-HTTP_TIMEOUT = 20
 
+# Azure OpenAI
 AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
 AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 
+# Supabase (map data)
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+# AgentPhone
 AGENTPHONE_API_KEY = os.environ.get("AGENTPHONE_API_KEY")
 AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
-SUPERMEMORY_API_KEY = os.environ["SUPERMEMORY_API_KEY"]
+
+# Supermemory (persistent user personalization)
+SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")
+
+# Moss semantic search (optional)
+MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID")
+MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY")

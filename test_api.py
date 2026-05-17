@@ -35,14 +35,16 @@ async def test_webhook():
             }
         }
         try:
-            response = await client.post(
-                f"{BASE_URL}/webhook",
-                json=payload,
-                timeout=10
-            )
+            response = await client.post(f"{BASE_URL}/webhook", json=payload, timeout=10)
             print(f"   Status: {response.status_code}")
-            result = response.json()
-            print(f"   Response: {json.dumps(result, indent=2)}")
+            print(f"   Content-Type: {response.headers.get('content-type')}")
+
+            chunks = [
+                json.loads(line)
+                for line in response.text.splitlines()
+                if line.strip()
+            ]
+            print(f"   Response chunks: {json.dumps(chunks, indent=2)}")
         except Exception as e:
             print(f"   Error: {e}")
 

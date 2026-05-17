@@ -1,0 +1,214 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "find_poi",
+      "description": "Search for a point of interest (gate, restroom, restaurant, lounge, ATM, etc.) by name in the airport. Numbers are matched exactly — 'Gate 5' will never resolve to 'Gate 6'. If the result is ambiguous (e.g. two Starbucks on different floors), call resolve_poi next.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "airport_id": {
+            "type": "string",
+            "description": "Airport IATA code, e.g. SJC"
+          },
+          "q": {
+            "type": "string",
+            "description": "What the user is looking for, e.g. 'Gate 12', 'Starbucks', 'restroom', 'security'"
+          }
+        },
+        "required": ["airport_id", "q"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "resolve_poi",
+      "description": "When find_poi returns an ambiguous result (multiple locations with the same name on different floors), call this with any nearby landmarks the user mentioned to identify the right one.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "airport_id": {
+            "type": "string",
+            "description": "Airport IATA code, e.g. SJC"
+          },
+          "name": {
+            "type": "string",
+            "description": "The ambiguous POI name, e.g. 'Starbucks'"
+          },
+          "landmarks": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Nearby landmarks the user mentioned, e.g. ['Gate 10', 'United Airlines lounge']"
+          }
+        },
+        "required": ["airport_id", "name", "landmarks"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "find_nearest_poi",
+      "description": "Find the nearest POI of a given type (e.g. restroom, cafe, gate, atm) to a source POI. Use the source POI id returned by find_poi or resolve_poi. Returns the closest POI by walking distance with an estimated walking time.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "airport_id": {
+            "type": "string",
+            "description": "Airport IATA code, e.g. SJC"
+          },
+          "source_id": {
+            "type": "string",
+            "description": "POI id of the reference location (from find_poi or resolve_poi)"
+          },
+          "poi_type": {
+            "type": "string",
+            "description": "POI type to search for, e.g. 'restroom', 'cafe', 'gate', 'atm', 'lounge'"
+          }
+        },
+        "required": ["airport_id", "source_id", "poi_type"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_route",
+      "description": "Get step-by-step walking directions between two points in the airport. Returns named stops along the route with each node type, any floor/level changes, and an estimated walking time in minutes. Use the POI ids returned by find_poi or resolve_poi.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "airport_id": {
+            "type": "string",
+            "description": "Airport IATA code, e.g. SJC"
+          },
+          "start_id": {
+            "type": "string",
+            "description": "POI id of the starting location (from find_poi or resolve_poi)"
+          },
+          "end_id": {
+            "type": "string",
+            "description": "POI id of the destination (from find_poi or resolve_poi)"
+          }
+        },
+        "required": ["airport_id", "start_id", "end_id"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_session",
+      "description": "Retrieve the current navigation session state for this call: where the user is now, their destination, and which step of the route they are on. Call this at the start of every call and whenever you are unsure of the user's current progress.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_history",
+      "description": "Retrieve the caller's past navigation sessions from previous calls using their phone number. Use this at the start of a call to personalise the greeting — e.g. 'Last time you called, you were heading to the Starbucks near Gate 10. Would you like to go there again?'",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_location",
+      "description": "Update the user's confirmed current location to a specific POI. Call this when the user says they are at a specific place. Use the POI id from find_poi or resolve_poi.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "poi_id": {
+            "type": "string",
+            "description": "POI id of the user's current location (from find_poi or resolve_poi)"
+          },
+          "poi_name": {
+            "type": "string",
+            "description": "Human-readable name, e.g. 'Gate 12'"
+          }
+        },
+        "required": ["poi_id", "poi_name"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_destination",
+      "description": "Record the user's navigation destination before calling get_route. Also call this if the user changes destination mid-journey.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "airport_id": {
+            "type": "string",
+            "description": "Airport IATA code, e.g. OAK"
+          },
+          "poi_id": {
+            "type": "string",
+            "description": "POI id of the destination (from find_poi or resolve_poi)"
+          },
+          "poi_name": {
+            "type": "string",
+            "description": "Human-readable name of the destination, e.g. 'Gate 22B'"
+          }
+        },
+        "required": ["airport_id", "poi_id", "poi_name"]
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "advance_step",
+      "description": "Mark the current route step as completed and advance to the next one. Call this when the user confirms they have passed through or reached the current checkpoint. Returns the confirmed location id, the next step description, or a completion message if they have arrived at their destination.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    "server": {
+      "url": "https://airflowbackendv2-production.up.railway.app/vapi/tools",
+      "timeoutSeconds": 20
+    }
+  }
+]

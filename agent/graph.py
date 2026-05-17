@@ -1,17 +1,58 @@
 import time
-from typing import Literal
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator, Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langgraph.checkpoint.memory import InMemorySaver
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
-from pydantic import BaseModel
 
 from agent.llm import build_llm
 from agent.memory import save_conversation
 from agent.prompts import build_system_prompt
 from agent.state import State
+from agent.timing import add_llm, add_tool
 from agent.tools import TOOLS
+
+_EARLY_SPEAK_MESSAGES = [
+    "Let me check that for you.",
+    "One moment while I look that up.",
+    "Checking the airport map now.",
+    "I'll help you find that.",
+]
+_EARLY_SPEAK_IDX = 0
+_spoken_early_var: ContextVar[bool] = ContextVar("spoken_early", default=False)
+_speak_early_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "speak_early_callback",
+    default=None,
+)
+
+# Module-level flag: True while tools are executing. External voice interfaces
+# (AgentPhone etc.) can poll this to gate STT input.
+tools_running: bool = False
+
+
+def speak_early(text: str) -> None:
+    callback = _speak_early_callback_var.get()
+    if callback:
+        callback(text)
+    else:
+        print(f"[SPEAK EARLY] {text}")
+
+
+@contextmanager
+def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterator[None]:
+    token = _speak_early_callback_var.set(callback)
+    try:
+        yield
+    finally:
+        _speak_early_callback_var.reset(token)
+
+
+def reset_turn_state() -> None:
+    _spoken_early_var.set(False)
+
 
 ITERATION_CAP = 30
 
@@ -32,6 +73,7 @@ def _make_agent(phase: str):
         ])
 
         dt = time.time() - t0
+        add_llm(dt)
         if response.tool_calls:
             names = [tc["name"] if isinstance(tc, dict) else tc.name for tc in response.tool_calls]
             print(f"[AGENT:{phase}] {dt:.2f}s -> calling: {', '.join(names)}")
@@ -72,10 +114,32 @@ def _repair_node(state: State):
 
 # ================= subgraph builder =================
 
+_tool_node = ToolNode(TOOLS, handle_tool_errors=True)
+
+
+def _timed_tools(state: State):
+    global _EARLY_SPEAK_IDX, tools_running
+
+    if not _spoken_early_var.get():
+        early_msg_text = _EARLY_SPEAK_MESSAGES[_EARLY_SPEAK_IDX % len(_EARLY_SPEAK_MESSAGES)]
+        _EARLY_SPEAK_IDX += 1
+        _spoken_early_var.set(True)
+        speak_early(early_msg_text)
+
+    tools_running = True
+    t0 = time.time()
+    try:
+        result = _tool_node.invoke(state)
+    finally:
+        tools_running = False
+    add_tool(time.time() - t0)
+    return result
+
+
 def _build_subgraph(phase: str):
     builder = StateGraph(State)
     builder.add_node("agent", _make_agent(phase))
-    builder.add_node("tools", ToolNode(TOOLS, handle_tool_errors=True))
+    builder.add_node("tools", _timed_tools)
     builder.add_node("repair", _repair_node)
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", tools_condition)
@@ -86,68 +150,22 @@ def _build_subgraph(phase: str):
     return builder.compile()
 
 
-# ================= closure detection =================
+# ================= closure (heuristic, no LLM) =================
 
-class _ClosureDecision(BaseModel):
-    decision: Literal["ongoing", "task_complete", "user_declined"]
-
-
-_closure_llm = build_llm().with_structured_output(_ClosureDecision)
+_DECLINE_PHRASES = ("no thanks", "that's all", "i'm good", "bye", "goodbye", "no i'm set", "nope", "nah", "i'm set", "thank you", "thanks bye")
 
 
-_CLOSURE_PROMPT = """\
-You classify whether an airport navigation conversation is wrapping up.
-
-Pick exactly one label:
-- "user_declined": the user's latest message declines further help (e.g. "no thanks", "that's all", "I'm good", "bye", "no I'm set").
-- "task_complete": the agent's latest reply sounds like the immediate task just finished (e.g. "you've arrived at Gate 5") AND the agent has not yet asked whether the user needs anything else.
-- "ongoing": anything else — active routing, mid-question, gathering info, tool follow-ups.
-"""
-
-
-def _closure_node(state: State):
-    last_user = ""
-    last_ai: AIMessage | None = None
+def _closure_node(state: State) -> dict:
+    """Check if the user's latest message is a decline. If so, save conversation and set should_end."""
     for msg in reversed(state["messages"]):
-        if last_ai is None and isinstance(msg, AIMessage) and msg.content:
-            last_ai = msg
-        elif not last_user and isinstance(msg, HumanMessage):
-            last_user = msg.content if isinstance(msg.content, str) else str(msg.content)
-        if last_ai is not None and last_user:
+        if isinstance(msg, HumanMessage):
+            lower = (msg.content if isinstance(msg.content, str) else str(msg.content)).lower().strip()
+            if any(lower == p or lower.startswith(p) for p in _DECLINE_PHRASES):
+                user_id = state.get("user_id")
+                if user_id:
+                    save_conversation(user_id, state["messages"])
+                return {"should_end": True}
             break
-
-    if last_ai is None:
-        return {}
-
-    last_ai_text = last_ai.content if isinstance(last_ai.content, str) else str(last_ai.content)
-
-    try:
-        raw = _closure_llm.invoke([
-            SystemMessage(content=_CLOSURE_PROMPT),
-            HumanMessage(content=f"User: {last_user}\nAgent: {last_ai_text}"),
-        ])
-    except Exception as e:
-        print(f"[CLOSURE] classifier failed: {e}")
-        return {}
-
-    decision = raw.get("decision") if isinstance(raw, dict) else getattr(raw, "decision", None)
-    print(f"[CLOSURE] decision={decision}")
-
-    if decision == "user_declined":
-        user_id = state.get("user_id")
-        if user_id:
-            save_conversation(user_id, state["messages"])
-        return {"should_end": True}
-
-    if decision == "task_complete":
-        lowered = last_ai_text.lower()
-        if "anything else" not in lowered and "anything more" not in lowered:
-            updated = AIMessage(
-                content=last_ai_text.rstrip() + " Anything else I can help with?",
-                id=last_ai.id,
-            )
-            return {"messages": [updated]}
-
     return {}
 
 
@@ -167,13 +185,14 @@ def build_graph():
     builder.add_node("clarify", clarify)
     builder.add_node("navigate", navigate)
     builder.add_node("closure", _closure_node)
-    builder.add_conditional_edges(
-        START, _entry_router, {"clarify": "clarify", "navigate": "navigate"}
-    )
+
+    builder.add_conditional_edges(START, _entry_router, {"clarify": "clarify", "navigate": "navigate"})
+
     builder.add_edge("clarify", "closure")
     builder.add_edge("navigate", "closure")
     builder.add_edge("closure", END)
-    return builder.compile(checkpointer=InMemorySaver())
+
+    return builder.compile(checkpointer=MemorySaver())
 
 
 graph = build_graph()

@@ -1,20 +1,30 @@
 import hashlib
 import hmac
 import httpx
+import json
 import logging
+import queue
+import threading
+from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
+from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 
 from agent.config import AGENTPHONE_API_KEY, AGENTPHONE_WEBHOOK_SECRET
-from agent.graph import graph
+from agent.graph import ITERATION_CAP, bind_speak_early_callback, graph
+from agent import timing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Lincoln Airport Agent")
 AGENTPHONE_BASE_URL = "https://api.agentphone.ai/v1"
+DEFAULT_EARLY_SPEAK_TEXT = "Let me check that for you."
+STREAM_QUEUE_SENTINEL = object()
+EARLY_SPEAK_FALLBACK_SECONDS = 0.75
 
 
 # ── Signature verification ────────────────────────────────────────────────────
@@ -65,6 +75,82 @@ def _notify_via_agentphone(phone: str, message: str, method: str = "call"):
         return None
 
 
+def _build_graph_config(thread_id: str) -> dict[str, Any]:
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": ITERATION_CAP,
+    }
+
+
+def _extract_response_text(result: dict[str, Any]) -> str | None:
+    for message in reversed(result.get("messages", [])):
+        if hasattr(message, "content") and message.content and not getattr(message, "tool_calls", None):
+            return message.content if isinstance(message.content, str) else str(message.content)
+    return None
+
+
+def _graph_reply(user_text: str, thread_id: str, user_id: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
+    if user_id:
+        payload["user_id"] = user_id
+
+    result = graph.invoke(payload, config=_build_graph_config(thread_id))
+
+    response_text = _extract_response_text(result)
+    if not response_text:
+        return {"text": "I'm having trouble with that. Please try again."}
+
+    logger.info(f"{thread_id} response: {response_text[:100]}")
+    reply = {"text": response_text}
+    if result.get("should_end", False):
+        reply["hangup"] = True
+    return reply
+
+
+def _voice_webhook_stream(call_id: str, user_text: str, user_id: str | None = None) -> Iterator[bytes]:
+    payloads: queue.Queue[dict[str, Any] | object] = queue.Queue()
+    interim_sent = threading.Event()
+
+    def emit(payload: dict[str, Any]) -> None:
+        payloads.put(payload)
+
+    def emit_interim(text: str) -> None:
+        if interim_sent.is_set():
+            return
+        interim_sent.set()
+        emit({"text": text, "interim": True})
+
+    def worker() -> None:
+        try:
+            timing.reset()
+            with bind_speak_early_callback(emit_interim):
+                emit(_graph_reply(user_text, call_id, user_id))
+        except GraphRecursionError:
+            emit({"text": "I'm getting a bit turned around. Could you re-state what you need?"})
+        except Exception as e:
+            logger.error(f"Graph failed for {call_id}: {e}", exc_info=True)
+            emit({"text": "Something went wrong. Please try again or ask airport staff for help."})
+        finally:
+            payloads.put(STREAM_QUEUE_SENTINEL)
+
+    threading.Thread(target=worker, name=f"agentphone-{call_id}", daemon=True).start()
+
+    try:
+        first_payload = payloads.get(timeout=EARLY_SPEAK_FALLBACK_SECONDS)
+    except queue.Empty:
+        emit_interim(DEFAULT_EARLY_SPEAK_TEXT)
+        first_payload = payloads.get()
+
+    if first_payload is not STREAM_QUEUE_SENTINEL:
+        yield (json.dumps(first_payload) + "\n").encode()
+
+    while True:
+        payload = payloads.get()
+        if payload is STREAM_QUEUE_SENTINEL:
+            return
+        yield (json.dumps(payload) + "\n").encode()
+
+
 # ── Webhook ───────────────────────────────────────────────────────────────────
 
 @app.post("/")
@@ -82,8 +168,6 @@ async def webhook(request: Request):
             raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
-        body = request.app.state  # parse below
-        import json
         body = json.loads(raw_body)
     except Exception as e:
         logger.error(f"Failed to parse webhook body: {e}")
@@ -126,34 +210,18 @@ async def webhook(request: Request):
 
     logger.info(f"{call_id}: '{user_text}'")
 
-    # Run through LangGraph — callId is thread_id for multi-turn continuity
-    try:
-        config = {"configurable": {"thread_id": call_id}}
-        payload: dict = {"messages": [HumanMessage(content=user_text)]}
-        if user_id:
-            payload["user_id"] = user_id
-        result = graph.invoke(payload, config=config)
-
-        messages = result.get("messages", [])
-        if not messages:
-            return {"text": "I'm having trouble with that. Please try again."}
-
-        last_msg = messages[-1]
-        response_text = (
-            last_msg.content
-            if isinstance(last_msg.content, str)
-            else str(last_msg.content)
+    if channel == "voice":
+        return StreamingResponse(
+            _voice_webhook_stream(call_id, user_text, user_id),
+            media_type="application/x-ndjson",
         )
 
-        logger.info(f"{call_id} response: {response_text[:100]}")
+    timing.reset()
 
-        # Tell AgentPhone to hang up when conversation is complete
-        should_end = result.get("should_end", False)
-        if channel == "voice" and should_end:
-            return {"text": response_text, "hangup": True}
-
-        return {"text": response_text}
-
+    try:
+        return _graph_reply(user_text, call_id, user_id)
+    except GraphRecursionError:
+        return {"text": "I'm getting a bit turned around. Could you re-state what you need?"}
     except Exception as e:
         logger.error(f"Graph failed for {call_id}: {e}", exc_info=True)
         return {"text": "Something went wrong. Please try again or ask airport staff for help."}

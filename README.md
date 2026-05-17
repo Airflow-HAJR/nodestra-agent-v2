@@ -8,6 +8,7 @@ An AI airport navigation assistant that helps travelers find routes between gate
 - **Phone Integration** — Receive incoming calls via AgentPhone webhook
 - **Proactive Notifications** — Send gate change alerts via call or SMS
 - **Multi-turn Conversations** — Agent remembers your location across turns
+- **Personalized Memory** — Persistent user preferences via Supermemory
 - **Error Recovery** — Built-in repair logic for tool failures
 
 ## Setup
@@ -77,10 +78,10 @@ Receives transcribed messages from AgentPhone and routes them through the naviga
 ```
 
 **Response**:
+Voice replies stream as NDJSON so AgentPhone can start TTS on the first chunk:
 ```json
-{
-  "text": "You're currently at gate B4. To reach gate C7, head south down the main concourse..."
-}
+{"text": "Let me check that for you.", "interim": true}
+{"text": "You're currently at gate B4. To reach gate C7, head south down the main concourse..."}
 ```
 
 #### 2. **POST `/gate-change`** — Gate Change Notification
@@ -195,7 +196,7 @@ lincoln/
    - **Clarify** — Ask where user is and where they want to go
    - **Navigate** — Provide directions and nearby options
    - **Closure** — Detect if conversation is complete
-5. Last AI message is extracted and returned as TTS response
+5. Voice turns stream an interim NDJSON chunk first, then the final TTS response
 
 ### Outbound Notification Flow
 

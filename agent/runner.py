@@ -1,3 +1,4 @@
+import time
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -5,6 +6,7 @@ from langgraph.errors import GraphRecursionError
 
 from agent.graph import ITERATION_CAP, graph
 from agent.memory import save_conversation
+from agent import timing
 
 
 def run(user_id: str | None = None):
@@ -32,6 +34,9 @@ def run(user_id: str | None = None):
                 save_conversation(user_id, result["messages"])
             break
 
+        timing.reset()
+        t0 = time.time()
+
         payload = {**initial_state, "messages": [HumanMessage(content=user)]}
         # user_id only needs to be in the first invocation; LangGraph checkpointer persists state
         initial_state = {}
@@ -45,10 +50,14 @@ def run(user_id: str | None = None):
             )
             continue
 
+        total = time.time() - t0
+
         for m in reversed(result["messages"]):
             if hasattr(m, "content") and m.content:
                 print("\nAgent:", m.content)
                 break
+
+        print(timing.summary(total))
 
         if result.get("should_end"):
             print("\n[conversation ended]")

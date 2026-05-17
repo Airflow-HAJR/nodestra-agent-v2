@@ -18,6 +18,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 # AgentPhone
 AGENTPHONE_API_KEY = os.environ.get("AGENTPHONE_API_KEY")
 AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
+AGENTPHONE_AGENT_ID = os.environ.get("AGENTPHONE_AGENT_ID")
 
 # Supermemory (persistent user personalization)
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")

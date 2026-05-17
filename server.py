@@ -1,12 +1,12 @@
 import hashlib
 import hmac
-import httpx
 import json
 import logging
 import queue
 import threading
 from typing import Any, Iterator
 
+from agentphone import AgentPhone
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
@@ -21,7 +21,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Lincoln Airport Agent")
-AGENTPHONE_BASE_URL = "https://api.agentphone.ai/v1"
+_agentphone = AgentPhone(api_key=AGENTPHONE_API_KEY) if AGENTPHONE_API_KEY else None
+_agent_id = "cmpa2b618030ojz00wyj247l8"
+_number_id = "cmp7k8i5403so807bvhzljclg"
 DEFAULT_EARLY_SPEAK_TEXT = "Let me check that for you."
 STREAM_QUEUE_SENTINEL = object()
 EARLY_SPEAK_FALLBACK_SECONDS = 0.75
@@ -51,25 +53,19 @@ class GateChangeRequest(BaseModel):
 
 
 def _notify_via_agentphone(phone: str, message: str, method: str = "call"):
-    if not AGENTPHONE_API_KEY:
+    if not _agentphone:
         return None
-
-    headers = {
-        "Authorization": f"Bearer {AGENTPHONE_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     try:
         if method == "call":
-            url = f"{AGENTPHONE_BASE_URL}/calls"
-            payload = {"to": phone, "message": message}
+            return _agentphone.calls._post("/v1/calls", to=phone, message=message)
         else:
-            url = f"{AGENTPHONE_BASE_URL}/sms"
-            payload = {"to": phone, "body": message}
-
-        response = httpx.post(url, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        return response.json()
+            return _agentphone.messages.send(
+                agent_id=_agent_id,
+                to_number=phone,
+                body=message,
+                number_id=_number_id,
+            )
     except Exception as e:
         logger.error(f"AgentPhone {method} failed: {e}")
         return None
@@ -219,12 +215,18 @@ async def webhook(request: Request):
     timing.reset()
 
     try:
-        return _graph_reply(user_text, call_id, user_id)
+        reply = _graph_reply(user_text, call_id, user_id)
     except GraphRecursionError:
-        return {"text": "I'm getting a bit turned around. Could you re-state what you need?"}
+        reply = {"text": "I'm getting a bit turned around. Could you re-state what you need?"}
     except Exception as e:
         logger.error(f"Graph failed for {call_id}: {e}", exc_info=True)
-        return {"text": "Something went wrong. Please try again or ask airport staff for help."}
+        reply = {"text": "Something went wrong. Please try again or ask airport staff for help."}
+
+    reply_text = reply.get("text", "")
+    if reply_text and user_id:
+        _notify_via_agentphone(user_id, reply_text, method="imessage")
+
+    return {"status": "ok"}
 
 
 # ── Gate change notifications ─────────────────────────────────────────────────
@@ -252,7 +254,7 @@ async def gate_change(body: GateChangeRequest):
         return {"status": "called", "result": result}
 
     # Fall back to SMS
-    result = _notify_via_agentphone(body.phone, message, method="sms")
+    result = _notify_via_agentphone(body.phone, message, method="imessage")
     if result:
         logger.info(f"SMS sent to {body.phone}")
         return {"status": "sms_sent", "result": result}

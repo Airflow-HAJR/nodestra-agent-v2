@@ -18,4 +18,5 @@ dependencies = [
     "uvicorn>=0.34",
     "moss>=0.1.0",
     "supermemory>=0.1.0",
+    "agentphone>=0.7.0",
 ]

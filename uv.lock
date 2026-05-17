@@ -3,6 +3,18 @@ revision = 3
 requires-python = ">=3.13"
 
 [[package]]
+name = "agentphone"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b8/13/f7e474ce1a22e3684186b0dd9e62de34ff47fc1b5a79c9de03492597afb6/agentphone-0.7.0.tar.gz", hash = "sha256:1b0e729dadb543b1e50adbbbc5f745201e697f6e0158e5150bec9bd644920b62", size = 15149, upload-time = "2026-05-17T06:36:10.549Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/f8/63435c9113a15d4aff3334b31e73ae31cff5b5692bf18f9d185ef453f807/agentphone-0.7.0-py3-none-any.whl", hash = "sha256:823dd35c99360e8163e0fb440707c5156571b590ef76f6ecf0b36a5d5ca3e19b", size = 18759, upload-time = "2026-05-17T06:36:09.214Z" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -746,6 +758,7 @@ name = "lngg"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "agentphone" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "ipykernel" },
@@ -763,6 +776,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agentphone", specifier = ">=0.7.0" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "ipykernel", specifier = ">=7.2.0" },

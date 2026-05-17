@@ -5,10 +5,12 @@ import requests
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId
+from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent.config import BASE_URL, DEFAULT_AIRPORT, HTTP_TIMEOUT
+from agent.memory import search_memories
 
 
 # ================= SCHEMAS =================
@@ -153,4 +155,23 @@ def set_nav_state(
     return Command(update=update)
 
 
-TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state]
+class SearchUserMemoryInput(BaseModel):
+    query: str = Field(
+        description="Natural language query describing what user preference or context to look up, "
+                    "e.g. 'food preferences', 'payment cards and lounge access', 'mobility or accessibility needs'"
+    )
+
+
+@tool(args_schema=SearchUserMemoryInput)
+def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str:
+    """Look up persistent facts about this user: food preferences, payment cards, loyalty programs,
+    accessibility needs, lifestyle habits, and location patterns. Call this before recommending a
+    category of POI or when you want to personalize navigation for this user."""
+    user_id = state.get("user_id")
+    if not user_id:
+        return "No user identity available — cannot retrieve personalized memories."
+    print(f"[TOOL] search_user_memory query={query!r} user={user_id}")
+    return search_memories(user_id, query)
+
+
+TOOLS = [find_poi, get_route, get_nodes, resolve_poi, find_nearest, set_nav_state, search_user_memory]

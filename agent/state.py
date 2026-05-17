@@ -11,3 +11,4 @@ class State(TypedDict):
     final_destination: Optional[str]
     last_error: Optional[str]
     should_end: Optional[bool]
+    user_id: Optional[str]

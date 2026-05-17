@@ -18,6 +18,7 @@ Tool use:
 - get_route: two POI ids.
 - resolve_poi: only when find_poi returns multiple candidates.
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
+- search_user_memory: call this before recommending a category of POI or when the user expresses an open-ended need (e.g. "I'm hungry", "I want to relax", "need a drink"). Use the result to tailor find_nearest queries and surface relevant perks (e.g. lounge access from a card, preferred cuisine, accessibility routing). Do NOT call it for navigation steps the user has explicitly stated.
 
 Routing flow:
 1. User states destination → find_poi → set_nav_state(final_destination=<id>).

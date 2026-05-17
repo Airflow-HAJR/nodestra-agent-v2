@@ -8,6 +8,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel
 
 from agent.llm import build_llm
+from agent.memory import save_conversation
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.tools import TOOLS
@@ -133,6 +134,9 @@ def _closure_node(state: State):
     print(f"[CLOSURE] decision={decision}")
 
     if decision == "user_declined":
+        user_id = state.get("user_id")
+        if user_id:
+            save_conversation(user_id, state["messages"])
         return {"should_end": True}
 
     if decision == "task_complete":

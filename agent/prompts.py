@@ -6,6 +6,8 @@ You are a voice navigation assistant for Oakland International (OAK). Brief, cle
 
 NAV STATE: {nav}
 
+PHASE FOCUS: {phase_focus}
+{error_block}
 Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
 
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
@@ -36,9 +38,31 @@ Rules:
 """
 
 
-def build_system_prompt(state: State) -> str:
+PHASE_FOCUS = {
+    "clarify": (
+        "You don't yet have the user's destination. Top priority: figure out where they want to go. "
+        "Use find_poi (and resolve_poi if there are multiple candidates) and call "
+        "set_nav_state(final_destination=<id>) as soon as you know it. "
+        "Don't compute routes yet."
+    ),
+    "navigate": (
+        "The destination is set. Confirm the user's current location if it's still unknown "
+        "(find_poi + set_nav_state(current_location=<id>)), then guide step-by-step using get_route. "
+        "Handle detour requests with find_nearest without clearing the saved final_destination."
+    ),
+}
+
+
+def build_system_prompt(state: State, phase: str = "navigate") -> str:
     nav = (
         f"current_location={state.get('current_location') or 'unknown'} | "
         f"final_destination={state.get('final_destination') or 'unknown'}"
     )
-    return SYSTEM_TEMPLATE.format(nav=nav)
+    focus = PHASE_FOCUS.get(phase, "")
+    err = state.get("last_error")
+    error_block = (
+        f"\nRECENT TOOL ERROR: {err}\nTry a different approach; do not repeat the same call with the same args.\n"
+        if err
+        else ""
+    )
+    return SYSTEM_TEMPLATE.format(nav=nav, phase_focus=focus, error_block=error_block)

@@ -9,3 +9,5 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     current_location: Optional[str]
     final_destination: Optional[str]
+    last_error: Optional[str]
+    should_end: Optional[bool]

@@ -169,8 +169,20 @@ def resolve_poi(
 
 
 @tool(args_schema=RouteInput)
-def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT):
+def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Get shortest path between two POIs. start and end must be POI ids returned by find_poi."""
+    # Refresh start from state/Supermemory so the route always begins from the user's
+    # actual current location, not a hallucinated or stale one from the LLM.
+    user_id = state.get("user_id") if state else None
+    state_loc = state.get("current_location") if state else None
+    if state_loc and state_loc != start:
+        print(f"[TOOL] get_route corrected start {start!r} → {state_loc!r} from state")
+        start = state_loc
+    elif user_id:
+        fresh = get_last_location(user_id)
+        if fresh and fresh != start:
+            print(f"[TOOL] get_route refreshed start {start!r} → {fresh!r} from Supermemory")
+            start = fresh
     print(f"[TOOL] get_route start={start} end={end}")
     t0 = time.time()
 

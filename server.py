@@ -4,6 +4,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Any, Iterator
 
 from agentphone import AgentPhone
@@ -21,6 +22,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Lincoln Airport Agent")
+
+# ── Request deduplication ─────────────────────────────────────────────────────
+
+_dedup_lock = threading.Lock()
+_recent_requests: dict[str, float] = {}
+_DEDUP_TTL = 30.0  # seconds
+
+
+def _check_and_register(call_id: str, user_text: str) -> bool:
+    """Return True if this is a new request and should be processed; False if duplicate."""
+    key = f"{call_id}:{hashlib.md5(user_text.encode()).hexdigest()}"
+    now = time.time()
+    with _dedup_lock:
+        expired = [k for k, t in _recent_requests.items() if now - t > _DEDUP_TTL]
+        for k in expired:
+            del _recent_requests[k]
+        if key in _recent_requests:
+            return False
+        _recent_requests[key] = now
+        return True
+
+
 _agentphone = AgentPhone(api_key=AGENTPHONE_API_KEY) if AGENTPHONE_API_KEY else None
 _agent_id = "cmpa2b618030ojz00wyj247l8"
 _number_id = "cmp7k8i5403so807bvhzljclg"
@@ -203,6 +226,10 @@ async def webhook(request: Request):
     if not user_text:
         logger.warning(f"Empty message for {call_id}")
         return {"text": "I didn't catch that. Can you repeat?"}
+
+    if not _check_and_register(call_id, user_text):
+        logger.info(f"Duplicate request for {call_id}, skipping inference")
+        return {"status": "ok"}
 
     logger.info(f"{call_id}: '{user_text}'")
 

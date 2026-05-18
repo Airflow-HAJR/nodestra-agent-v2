@@ -1,6 +1,6 @@
 ALL CODE IS DISTRIBUTED ON THIS ORGANIZATION's 3 REPOSITORIES. See the other two repositories in this organization for the hydration layer built with MOSS and the custom map builder we created to provide an indoor map of OAK airport to the agent.
 
-<img width="956" height="536" alt="Screenshot 2026-05-17 at 8 31 20 PM" src="https://github.com/user-attachments/assets/05d2e96a-a416-480f-b86b-6beb0e1c6bff" />
+<img width="950" height="551" alt="Screenshot 2026-05-17 at 8 42 50 PM" src="https://github.com/user-attachments/assets/0ca8d26f-a559-4f8b-ba9b-7780487dc7c5" />
 
 DeepIndoors
 

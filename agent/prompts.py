@@ -10,7 +10,7 @@ NAV STATE: {nav}
 CURRENT TIME: May 17, 12:00 pm
 
 PHASE FOCUS: {phase_focus}
-{error_block}
+{error_block}{commerce_block}
 Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
 
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
@@ -27,6 +27,11 @@ Tool use:
 - search_moss_flights: semantic search only over `oakland-flights` for open-ended flight questions such as destination, gate, or flight status lookups.
 - index_moss_pois: build or refresh the `oakland-pois` Moss index when POI search data appears stale or missing.
 - index_moss_flights: build or refresh the `oakland-flights` Moss index when flight search data appears stale or missing.
+
+Commerce workflow (stores, restaurants, cafes, lounges, duty-free, newsstands, or any venue where payment is expected):
+1. search_user_memory for payment preferences (cards, Apple Pay, loyalty programs, dietary needs).
+2. search_moss_pois to find matching venues — use the preference as query context (e.g. "halal restaurant", "cafe accepts Amex").
+3. Surface only venues that align with the returned preferences. Always attribute out loud: name the preference and its source.
 
 Routing flow:
 1. User states destination → find_poi → set_nav_state(final_destination=<id>).
@@ -81,5 +86,23 @@ def build_system_prompt(state: State, phase: str = "navigate") -> str:
         if err
         else ""
     )
+    commerce = state.get("commerce_context")
+    commerce_block = (
+        f"\nCOMMERCE CONTEXT (pre-fetched this turn — act on it immediately):\n{commerce}\n"
+        "COMMERCE INSTRUCTIONS (voice — 2-3 sentences max, NO lists, NO markdown, NO bullet points):\n"
+        "Open with one sentence that names the key preference AND its source venue if one appears in "
+        "PAYMENT_PREFERENCES (e.g. 'Based on your halal preference and your last visit to Chase Center '  "
+        "where you paid with Amex...'). Then name 2 options from COMMERCE_POIS in that same flowing sentence "
+        "or the next. If any POI has a standout benefit for the user (cashback, Priority Pass, dining credit), "
+        "call it out explicitly in the final sentence. End with 'Want directions to one of them?'\n"
+        if commerce
+        else ""
+    )
     current_time = datetime.now().strftime("%I:%M %p")
-    return SYSTEM_TEMPLATE.format(nav=nav, phase_focus=focus, error_block=error_block, current_time=current_time)
+    return SYSTEM_TEMPLATE.format(
+        nav=nav,
+        phase_focus=focus,
+        error_block=error_block,
+        commerce_block=commerce_block,
+        current_time=current_time,
+    )

@@ -84,32 +84,39 @@ def get_last_location(user_id: str) -> str | None:
 
 
 def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
-    """Upsert the user's current location as a Supermemory dynamic document."""
+    """Overwrite the user's current location — delete all prior location docs first so
+    only one location state ever exists in Supermemory."""
     try:
         container_tag = _sanitize_container_tag(user_id)
         if not container_tag:
             return
         custom_id = _location_custom_id(container_tag)
         content = f"poi_id:{poi_id}\npoi_name:{poi_name}"
-        # Find existing location doc by custom_id and update it; otherwise create one.
-        resp = _client.documents.list(
-            container_tags=[container_tag],
-            include_content=True,
-        )
+
+        # Delete every existing location doc (custom_id match OR legacy poi_id: content)
+        # before writing the new one so stale states can't accumulate.
+        resp = _client.documents.list(container_tags=[container_tag], include_content=True)
         docs = getattr(resp, "memories", []) or []
         for doc in docs:
-            if _value(doc, "custom_id", None) == custom_id:
+            is_location_doc = (
+                _value(doc, "custom_id", None) == custom_id
+                or "poi_id:" in (_value(doc, "content", "") or "")
+            )
+            if is_location_doc:
                 doc_id = _value(doc, "id", None)
                 if doc_id:
-                    _client.documents.update(id=doc_id, content=content)
-                    print(f"[MEMORY] location updated → {poi_id} for {container_tag}")
-                    return
+                    try:
+                        _client.documents.delete(id=doc_id)
+                        print(f"[MEMORY] deleted stale location doc {doc_id}")
+                    except Exception:
+                        pass
+
         _client.documents.add(
             content=content,
             container_tag=container_tag,
             custom_id=custom_id,
         )
-        print(f"[MEMORY] location created → {poi_id} for {container_tag}")
+        print(f"[MEMORY] location set → {poi_id} for {container_tag}")
     except Exception as e:
         print(f"[MEMORY] update_location failed: {e}")
 

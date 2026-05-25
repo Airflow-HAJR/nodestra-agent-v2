@@ -10,6 +10,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent.config import DEFAULT_AIRPORT
+from agent.timing import add_moss, add_supermemory
 from agent.db import load_map_levels
 from agent.map_engine import (
     dijkstra_multilevel,
@@ -84,13 +85,9 @@ class IndexMossInput(BaseModel):
 @tool(args_schema=POIInput)
 def find_poi(q: str, airport_id: str = DEFAULT_AIRPORT):
     """Fuzzy search for a single POI name. Returns a dict with an 'id' field to pass to get_route."""
-    print(f"[TOOL] find_poi q={q!r}")
-    t0 = time.time()
-
+    print("[thinking]")
     levels = load_map_levels(airport_id)
     results = search_pois(levels, q)
-
-    print(f"  -> {len(results)} candidates in {time.time() - t0:.2f}s")
 
     if not results:
         return {"found": False, "message": f"No POI found matching '{q}'."}
@@ -122,16 +119,13 @@ def resolve_poi(
     airport_id: str = DEFAULT_AIRPORT,
 ):
     """Disambiguate POIs with the same name on different floors using a nearby landmark or floor hint."""
-    print(f"[TOOL] resolve_poi name={name!r} landmark={landmark!r} floor={floor!r}")
-    t0 = time.time()
-
+    print("[thinking]")
     levels = load_map_levels(airport_id)
 
     if floor:
         floor_lower = floor.lower()
         for c in candidates:
             if floor_lower in (c.get("level") or "").lower():
-                print(f"  -> resolved by floor in {time.time() - t0:.2f}s")
                 return {"found": True, "id": c["id"], "name": c["name"], "type": c.get("type", ""), "level": c.get("level", "")}
 
     if not landmark:
@@ -158,7 +152,6 @@ def resolve_poi(
     if best_candidate is None:
         best_candidate = candidates[0]
 
-    print(f"  -> resolved by landmark in {time.time() - t0:.2f}s")
     return {
         "found": True,
         "id": best_candidate["id"],
@@ -173,24 +166,22 @@ def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: An
     """Get shortest path between two POIs. start and end must be POI ids returned by find_poi."""
     # Refresh start from state/Supermemory so the route always begins from the user's
     # actual current location, not a hallucinated or stale one from the LLM.
+    print("[thinking]")
     user_id = state.get("user_id") if state else None
     state_loc = state.get("current_location") if state else None
     if state_loc and state_loc != start:
-        print(f"[TOOL] get_route corrected start {start!r} → {state_loc!r} from state")
         start = state_loc
     elif user_id:
+        t0 = time.time()
         fresh = get_last_location(user_id)
+        add_supermemory(time.time() - t0)
         if fresh and fresh != start:
-            print(f"[TOOL] get_route refreshed start {start!r} → {fresh!r} from Supermemory")
             start = fresh
-    print(f"[TOOL] get_route start={start} end={end}")
-    t0 = time.time()
 
     levels = load_map_levels(airport_id)
     result = dijkstra_multilevel(levels, start, end)
 
     if not result:
-        print(f"  -> no route in {time.time() - t0:.2f}s")
         return {"found": False, "stops": [], "level_changes": [], "distance": 0, "estimated_minutes": 0}
 
     raw = {
@@ -209,29 +200,19 @@ def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: An
         "distance": round(result["distance"], 4),
         "estimated_minutes": max(1, round(result["distance"] * 10)),
     }
-    route_text = format_route_speech(raw)
-
-    print(f"  -> route in {time.time() - t0:.2f}s")
-    print(f"[ROUTE RAW] {json.dumps(raw, ensure_ascii=True)}")
-    print(f"[ROUTE TEXT] {route_text}")
-
-    return route_text
+    return format_route_speech(raw)
 
 
 @tool(args_schema=GetNodesInput)
 def get_nodes(airport_id: str = DEFAULT_AIRPORT, floor: Optional[str] = None):
     """List all POI nodes for an airport, optionally filtered by floor."""
-    print(f"[TOOL] get_nodes floor={floor}")
-    t0 = time.time()
-
+    print("[thinking]")
     levels = load_map_levels(airport_id)
     nodes = []
     for lvl in levels:
         if floor and lvl["name"] != floor:
             continue
         nodes.extend(lvl["pois"])
-
-    print(f"  -> {len(nodes)} nodes in {time.time() - t0:.2f}s")
     return nodes
 
 
@@ -239,14 +220,14 @@ def get_nodes(airport_id: str = DEFAULT_AIRPORT, floor: Optional[str] = None):
 def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Find the closest POI of a given type from a source location."""
     # Refresh source from Supermemory dynamic profile so detours always use the latest location.
+    print("[thinking]")
     user_id = state.get("user_id") if state else None
     if user_id:
+        t0 = time.time()
         fresh = get_last_location(user_id)
+        add_supermemory(time.time() - t0)
         if fresh and fresh != source:
-            print(f"[TOOL] find_nearest refreshed source {source!r} → {fresh!r} from Supermemory")
             source = fresh
-    print(f"[TOOL] find_nearest source={source!r} type={poi_type!r}")
-    t0 = time.time()
 
     levels = load_map_levels(airport_id)
 
@@ -280,7 +261,6 @@ def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, 
     if best_candidate is None:
         return {"found": False, "message": f"No reachable POI of type '{poi_type}'."}
 
-    print(f"  -> nearest in {time.time() - t0:.2f}s")
     return {
         "found": True,
         "id": best_candidate["id"],
@@ -308,9 +288,7 @@ def set_nav_state(
     Call this when the user tells you a new destination or confirms they've moved to a new checkpoint.
     Pass POI ids (e.g. 'gate-J292'), not raw names. Pass only the field(s) that changed.
     """
-    print(f"[TOOL] set_nav_state final={final_destination!r} current={current_location!r}")
-    t0 = time.time()
-
+    print("[thinking]")
     levels = load_map_levels(DEFAULT_AIRPORT)
     poi_by_id = {p["id"]: p for lvl in levels for p in lvl["pois"]}
     valid_ids = set(poi_by_id)
@@ -323,7 +301,6 @@ def set_nav_state(
 
     if errors:
         msg = "Error: " + " | ".join(errors)
-        print(f"[TOOL] set_nav_state validation failed: {msg}")
         return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
 
     nav_update: dict = {"messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)]}
@@ -336,7 +313,6 @@ def set_nav_state(
             poi = poi_by_id.get(current_location, {})
             poi_name = poi.get("name") or current_location
             update_location(user_id, current_location, poi_name)
-    print(f"  -> set_nav_state in {time.time() - t0:.2f}s")
     return Command(update=nav_update)
 
 
@@ -355,12 +331,12 @@ def set_flight_number(
     flight_number: str,
 ) -> Command:
     """Save the user's flight number to state and Supermemory so it persists across conversations."""
-    print(f"[TOOL] set_flight_number flight={flight_number!r}")
-    t0 = time.time()
+    print("[thinking with supermemory]")
     user_id = state.get("user_id")
     if user_id:
+        t0 = time.time()
         update_flight(user_id, flight_number)
-    print(f"  -> set_flight_number in {time.time() - t0:.2f}s")
+        add_supermemory(time.time() - t0)
     return Command(update={
         "flight_number": flight_number,
         "messages": [ToolMessage(content=f"Flight number set to {flight_number}", tool_call_id=tool_call_id)],
@@ -375,58 +351,45 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
     user_id = state.get("user_id")
     if not user_id:
         return "No user identity available — cannot retrieve personalized memories."
-    print(f"[TOOL] search_user_memory query={query!r} user={user_id}")
+    print("[thinking with supermemory]")
     t0 = time.time()
     result = search_memories(user_id, query)
-    print(f"  -> search_user_memory in {time.time() - t0:.2f}s")
-    print(f"[MEMORY] result:\n{result}")
+    add_supermemory(time.time() - t0)
     return result
 
 
 @tool(args_schema=SearchMossPoisInput)
 def search_moss_pois(query: str) -> str:
     """Semantic search only over the `oakland-pois` Moss index."""
-    top_k = 7
-    print(f"[TOOL] search_moss_pois query={query!r} top_k={top_k}")
+    print("[thinking with moss]")
     t0 = time.time()
-    result = moss_semantic_search_pois(query=query, top_k=top_k)
-    print(f"  -> search_moss_pois in {time.time() - t0:.2f}s")
-    print(f"[MOSS] pois_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    result = moss_semantic_search_pois(query=query, top_k=7)
+    add_moss(time.time() - t0)
     return json.dumps(result, ensure_ascii=True)
 
 
 @tool(args_schema=SearchMossFlightsInput)
 def search_moss_flights(query: str) -> str:
     """Semantic search only over the `oakland-flights` Moss index."""
-    top_k = 7
-    print(f"[TOOL] search_moss_flights query={query!r} top_k={top_k}")
+    print("[thinking with moss]")
     t0 = time.time()
-    result = moss_semantic_search_flights(query=query, top_k=top_k)
-    print(f"  -> search_moss_flights in {time.time() - t0:.2f}s")
-    print(f"[MOSS] flights_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
+    result = moss_semantic_search_flights(query=query, top_k=7)
+    add_moss(time.time() - t0)
     return json.dumps(result, ensure_ascii=True)
 
 
 @tool(args_schema=IndexMossInput)
 def index_moss_pois(airport_id: str = DEFAULT_AIRPORT) -> str:
     """Build or refresh the Moss POI index for the airport."""
-    print(f"[TOOL] index_moss_pois airport_id={airport_id!r}")
-    t0 = time.time()
-    result = moss_index_pois(airport_id=airport_id)
-    print(f"  -> index_moss_pois in {time.time() - t0:.2f}s")
-    print(f"[MOSS] poi_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
-    return json.dumps(result, ensure_ascii=True)
+    print("[thinking with moss]")
+    return json.dumps(moss_index_pois(airport_id=airport_id), ensure_ascii=True)
 
 
 @tool(args_schema=IndexMossInput)
 def index_moss_flights(airport_id: str = DEFAULT_AIRPORT) -> str:
     """Build or refresh the Moss flight index for the airport."""
-    print(f"[TOOL] index_moss_flights airport_id={airport_id!r}")
-    t0 = time.time()
-    result = moss_index_flights(airport_id=airport_id)
-    print(f"  -> index_moss_flights in {time.time() - t0:.2f}s")
-    print(f"[MOSS] flight_index_result:\n{json.dumps(result, ensure_ascii=True, indent=2)}")
-    return json.dumps(result, ensure_ascii=True)
+    print("[thinking with moss]")
+    return json.dumps(moss_index_flights(airport_id=airport_id), ensure_ascii=True)
 
 
 TOOLS = [

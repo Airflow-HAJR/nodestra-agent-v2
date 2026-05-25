@@ -15,10 +15,20 @@ AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-0
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# AgentPhone
-AGENTPHONE_API_KEY = os.environ.get("AGENTPHONE_API_KEY")
-AGENTPHONE_WEBHOOK_SECRET = os.environ.get("AGENTPHONE_WEBHOOK_SECRET")
-AGENTPHONE_AGENT_ID = os.environ.get("AGENTPHONE_AGENT_ID")
+# Twilio
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
+
+# ElevenLabs
+ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # default: George
+
+# Deepgram (transcription)
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
+
+# Public base URL of this server (needed for Twilio to fetch <Play> audio)
+SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "http://localhost:8000")
 
 # Supermemory (persistent user personalization)
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")

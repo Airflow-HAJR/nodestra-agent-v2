@@ -14,7 +14,7 @@ from agent.memory import get_last_flight, get_last_location, save_conversation, 
 from agent.moss_search import search_moss_pois as moss_semantic_search_pois
 from agent.prompts import build_system_prompt
 from agent.state import State
-from agent.timing import add_llm, add_tool
+from agent.timing import add_llm, add_moss, add_supermemory, add_tool
 from agent.tools import TOOLS
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
@@ -69,7 +69,7 @@ def speak_early(text: str) -> None:
     if callback:
         callback(text)
     else:
-        print(f"[SPEAK EARLY] {text}")
+        print("[thinking]")
 
 
 @contextmanager
@@ -95,7 +95,7 @@ _llm_with_tools = build_llm().bind_tools(TOOLS)
 def _make_agent(phase: str):
     def agent(state: State):
         system = build_system_prompt(state, phase=phase)
-        print(f"[AGENT:{phase}] thinking...")
+        print("[thinking]")
         t0 = time.time()
 
         response = _llm_with_tools.invoke([
@@ -105,14 +105,6 @@ def _make_agent(phase: str):
 
         dt = time.time() - t0
         add_llm(dt)
-        if response.tool_calls:
-            names = [tc["name"] if isinstance(tc, dict) else tc.name for tc in response.tool_calls]
-            print(f"[AGENT:{phase}] {dt:.2f}s -> calling: {', '.join(names)}")
-        else:
-            content = response.content
-            text = content if isinstance(content, str) else str(content)
-            preview = text.replace("\n", " ")[:120]
-            print(f"[AGENT:{phase}] {dt:.2f}s -> reply: {preview}")
 
         return {"messages": [response], "last_error": None}
 
@@ -139,7 +131,7 @@ def _repair_node(state: State):
         if isinstance(msg, ToolMessage):
             err = msg.content if isinstance(msg.content, str) else str(msg.content)
             break
-    print(f"[REPAIR] {err[:200]}")
+    print("[thinking]")
     return {"last_error": err[:300]}
 
 
@@ -197,7 +189,6 @@ def _commerce_prefetch_node(state: State) -> dict:
     if not _has_commerce_intent(state):
         return {"commerce_context": None}
 
-    print("[COMMERCE] commerce intent detected — prefetching preferences and POIs")
     t0 = time.time()
 
     parts: list[str] = []
@@ -206,29 +197,25 @@ def _commerce_prefetch_node(state: State) -> dict:
     # Step 1: payment + food preferences from Supermemory
     user_id = state.get("user_id")
     if user_id:
-        print(f"[TOOL] search_user_memory query='food preferences dietary restrictions payment cards Apple Pay loyalty programs'")
+        print("[thinking with supermemory]")
         t1 = time.time()
         prefs = search_memories(
             user_id,
             "food preferences dietary restrictions payment cards Apple Pay loyalty programs",
         )
-        print(f"  -> search_user_memory in {time.time() - t1:.2f}s")
-        print(f"[MEMORY] result:\n{prefs}")
+        add_supermemory(time.time() - t1)
         if prefs and "no memories" not in prefs.lower():
             parts.append(f"PAYMENT_PREFERENCES:\n{prefs}")
 
     # Step 2: extract clean signals from prefs and drive the Moss query with them
     signals = _extract_moss_signals(prefs) if prefs else "food restaurant"
     moss_query = f"restaurant food {signals}"
-    print(f"[TOOL] search_moss_pois query={moss_query!r}")
+    print("[thinking with moss]")
     t2 = time.time()
     pois = moss_semantic_search_pois(query=moss_query, top_k=5)
-    print(f"  -> search_moss_pois in {time.time() - t2:.2f}s")
-    print(f"[MOSS] pois_result:\n{json.dumps(pois, ensure_ascii=True, indent=2)}")
+    add_moss(time.time() - t2)
     if pois:
         parts.append(f"COMMERCE_POIS:\n{json.dumps(pois, ensure_ascii=True)}")
-
-    print(f"[COMMERCE] prefetch done in {time.time() - t0:.2f}s — {len(parts)} section(s)")
     return {"commerce_context": "\n\n".join(parts) if parts else None}
 
 
@@ -330,12 +317,12 @@ def _init_node(state: State) -> dict:
     if not state.get("current_location"):
         poi_id = get_last_location(user_id)
         if poi_id:
-            print(f"[INIT] restored location from Supermemory: {poi_id}")
+            print("[thinking with supermemory]")
             result["current_location"] = poi_id
     if not state.get("flight_number"):
         flight = get_last_flight(user_id)
         if flight:
-            print(f"[INIT] restored flight from Supermemory: {flight}")
+            print("[thinking with supermemory]")
             result["flight_number"] = flight
     return result
 

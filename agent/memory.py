@@ -47,7 +47,7 @@ def search_memories(user_id: str, query: str) -> str:
             return "Relevant memories:\n" + "\n".join(f"- {m}" for m in relevant)
         return "No relevant user memories found."
     except Exception as e:
-        print(f"[MEMORY] search failed: {e}")
+        pass
         return "No relevant user memories found."
 
 
@@ -79,7 +79,7 @@ def get_last_location(user_id: str) -> str | None:
                         return line[len("poi_id:"):].strip()
         return None
     except Exception as e:
-        print(f"[MEMORY] get_last_location failed: {e}")
+        pass
         return None
 
 
@@ -107,7 +107,7 @@ def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
                 if doc_id:
                     try:
                         _client.documents.delete(id=doc_id)
-                        print(f"[MEMORY] deleted stale location doc {doc_id}")
+                        pass
                     except Exception:
                         pass
 
@@ -116,9 +116,9 @@ def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
             container_tag=container_tag,
             custom_id=custom_id,
         )
-        print(f"[MEMORY] location set → {poi_id} for {container_tag}")
+        pass
     except Exception as e:
-        print(f"[MEMORY] update_location failed: {e}")
+        pass
 
 
 def get_last_flight(user_id: str) -> str | None:
@@ -138,7 +138,7 @@ def get_last_flight(user_id: str) -> str | None:
                         return line[len("flight_number:"):].strip()
         return None
     except Exception as e:
-        print(f"[MEMORY] get_last_flight failed: {e}")
+        pass
         return None
 
 
@@ -157,12 +157,12 @@ def update_flight(user_id: str, flight_number: str) -> None:
                 doc_id = _value(doc, "id", None)
                 if doc_id:
                     _client.documents.update(id=doc_id, content=content)
-                    print(f"[MEMORY] flight updated → {flight_number} for {container_tag}")
+                    pass
                     return
         _client.documents.add(content=content, container_tag=container_tag, custom_id=custom_id)
-        print(f"[MEMORY] flight created → {flight_number} for {container_tag}")
+        pass
     except Exception as e:
-        print(f"[MEMORY] update_flight failed: {e}")
+        pass
 
 
 def save_conversation(user_id: str, messages: list) -> None:
@@ -184,9 +184,9 @@ def save_conversation(user_id: str, messages: list) -> None:
     try:
         container_tag = _sanitize_container_tag(user_id)
         if not container_tag:
-            print("[MEMORY] save skipped: invalid empty container tag after sanitization")
+            pass
             return
         _client.add(content="\n".join(lines), container_tag=container_tag)
-        print(f"[MEMORY] saved {len(lines)} turns for user {container_tag}")
+        pass
     except Exception as e:
-        print(f"[MEMORY] save failed: {e}")
+        pass

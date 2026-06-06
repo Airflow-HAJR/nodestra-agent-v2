@@ -1,37 +1,135 @@
+import asyncio
+import base64
 import hashlib
-import hmac
 import json
 import logging
-import queue
 import threading
 import time
-from typing import Any, Iterator
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from urllib.parse import parse_qs
 
-from agentphone import AgentPhone
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from deepgram import AsyncDeepgramClient
+from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
+from elevenlabs import ElevenLabs
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
+from twilio.request_validator import RequestValidator
+from twilio.rest import Client as TwilioClient
+from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
-from agent.config import AGENTPHONE_API_KEY, AGENTPHONE_WEBHOOK_SECRET
-from agent.graph import ITERATION_CAP, bind_speak_early_callback, graph
+from agent.config import (
+    DEEPGRAM_API_KEY,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID,
+    SERVER_BASE_URL,
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_PHONE_NUMBER,
+)
+from agent.graph import ITERATION_CAP, graph
 from agent import timing
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Lincoln Airport Agent")
+_executor = ThreadPoolExecutor(max_workers=10)
+
+# ── Clients ───────────────────────────────────────────────────────────────────
+
+_twilio = (
+    TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN
+    else None
+)
+_validator = RequestValidator(TWILIO_AUTH_TOKEN) if TWILIO_AUTH_TOKEN else None
+_eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
+
+# ── ElevenLabs TTS ────────────────────────────────────────────────────────────
+
+_FALLBACK_VOICE = "Polly.Joanna"
+
+# MP3 cache for <Play> URLs (welcome message, outbound calls)
+_audio_lock = threading.Lock()
+_audio_cache: dict[str, tuple[bytes, float]] = {}
+_AUDIO_TTL = 120.0
+
+
+def _store_audio(audio_bytes: bytes) -> str:
+    token = str(uuid.uuid4())
+    now = time.time()
+    with _audio_lock:
+        stale = [k for k, (_, t) in _audio_cache.items() if now - t > _AUDIO_TTL]
+        for k in stale:
+            del _audio_cache[k]
+        _audio_cache[token] = (audio_bytes, now)
+    return token
+
+
+@app.get("/audio/{token}")
+async def serve_audio(token: str):
+    """One-shot MP3 endpoint used by Twilio <Play> for the welcome message."""
+    with _audio_lock:
+        entry = _audio_cache.pop(token, None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Audio not found or already played")
+    audio_bytes, _ = entry
+    return Response(content=audio_bytes, media_type="audio/mpeg")
+
+
+def _tts_mp3_url(text: str) -> str | None:
+    """Generate ElevenLabs MP3, cache it, return a /audio/{token} URL for TwiML <Play>."""
+    if not _eleven or not ELEVENLABS_VOICE_ID:
+        return None
+    try:
+        audio_bytes = b"".join(
+            _eleven.text_to_speech.convert(
+                voice_id=ELEVENLABS_VOICE_ID,
+                text=text,
+                model_id="eleven_turbo_v2_5",
+                output_format="mp3_44100_128",
+            )
+        )
+        return f"{SERVER_BASE_URL}/audio/{_store_audio(audio_bytes)}"
+    except Exception as e:
+        logger.error(f"ElevenLabs TTS (mp3) failed: {e}")
+        return None
+
+
+def _tts_mulaw_iter(text: str):
+    """
+    Yield ElevenLabs mulaw 8 kHz chunks as they are generated.
+    First chunk arrives in ~75ms (ElevenLabs turbo TTFB).
+    Caller streams each chunk straight to Twilio — no wait for full audio.
+    Falls back to None-yielding iterator if ElevenLabs is unavailable.
+    """
+    if not _eleven or not ELEVENLABS_VOICE_ID:
+        return iter([])
+    try:
+        return _eleven.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            text=text,
+            model_id="eleven_turbo_v2_5",
+            output_format="ulaw_8000",
+        )
+    except Exception as e:
+        logger.error(f"ElevenLabs TTS (mulaw) failed: {e}")
+        return iter([])
+
 
 # ── Request deduplication ─────────────────────────────────────────────────────
 
 _dedup_lock = threading.Lock()
 _recent_requests: dict[str, float] = {}
-_DEDUP_TTL = 30.0  # seconds
+_DEDUP_TTL = 30.0
 
 
 def _check_and_register(call_id: str, user_text: str) -> bool:
-    """Return True if this is a new request and should be processed; False if duplicate."""
     key = f"{call_id}:{hashlib.md5(user_text.encode()).hexdigest()}"
     now = time.time()
     with _dedup_lock:
@@ -44,61 +142,57 @@ def _check_and_register(call_id: str, user_text: str) -> bool:
         return True
 
 
-_agentphone = AgentPhone(api_key=AGENTPHONE_API_KEY) if AGENTPHONE_API_KEY else None
-_agent_id = "cmpa2b618030ojz00wyj247l8"
-_number_id = "cmp7k8i5403so807bvhzljclg"
-DEFAULT_EARLY_SPEAK_TEXT = "Let me check that for you."
-STREAM_QUEUE_SENTINEL = object()
-EARLY_SPEAK_FALLBACK_SECONDS = 0.75
+# ── Twilio helpers ────────────────────────────────────────────────────────────
+
+def _verify_twilio_signature(request: Request, params: dict[str, str]) -> bool:
+    if not _validator:
+        logger.warning("TWILIO_AUTH_TOKEN not set — skipping signature verification")
+        return True
+    signature = request.headers.get("X-Twilio-Signature", "")
+    request_url = str(request.url)
+
+    # Try the raw request URL first.
+    if _validator.validate(request_url, params, signature):
+        return True
+
+    # Local tunneling/proxy setups often rewrite scheme/host on the app side.
+    # Validate against SERVER_BASE_URL + path as a fallback.
+    base = (SERVER_BASE_URL or "").rstrip("/")
+    if base:
+        forwarded_url = f"{base}{request.url.path}"
+        if request.url.query:
+            forwarded_url = f"{forwarded_url}?{request.url.query}"
+        if _validator.validate(forwarded_url, params, signature):
+            return True
+
+    logger.warning("Twilio signature validation failed for all candidate URLs")
+    return False
 
 
-# ── Signature verification ────────────────────────────────────────────────────
-
-def _verify_signature(payload_body: bytes, signature: str, secret: str, timestamp: str) -> bool:
-    # AgentPhone signs "{timestamp}.{raw_body}"
-    signed = f"{timestamp}.".encode() + payload_body
-    expected = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
-    result = hmac.compare_digest(f"sha256={expected}", signature)
-
-    if not result:
-        logger.warning(f"Sig mismatch — received: {signature!r}  expected: sha256={expected!r}")
-
-    return result
+def _parse_form(raw_body: bytes) -> dict[str, str]:
+    return {k: v[0] for k, v in parse_qs(raw_body.decode()).items()}
 
 
-# ── Outbound notifications ────────────────────────────────────────────────────
+def _build_gather_twiml(prompt: str) -> VoiceResponse:
+    """Build TwiML that prompts then listens using Twilio's built-in speech-to-text."""
+    vr = VoiceResponse()
+    gather = Gather(
+        input="speech",
+        speech_timeout="auto",
+        action="/twilio/voice/process",
+        method="POST",
+    )
+    gather.say(prompt, voice=_FALLBACK_VOICE)
+    vr.append(gather)
+    vr.say("I did not hear anything. Let's try again.", voice=_FALLBACK_VOICE)
+    vr.redirect("/twilio/voice")
+    return vr
 
-class GateChangeRequest(BaseModel):
-    phone: str
-    flight: str
-    old_gate: str
-    new_gate: str
 
-
-def _notify_via_agentphone(phone: str, message: str, method: str = "call"):
-    if not _agentphone:
-        return None
-
-    try:
-        if method == "call":
-            return _agentphone.calls._post("/v1/calls", to=phone, message=message)
-        else:
-            return _agentphone.messages.send(
-                agent_id=_agent_id,
-                to_number=phone,
-                body=message,
-                number_id=_number_id,
-            )
-    except Exception as e:
-        logger.error(f"AgentPhone {method} failed: {e}")
-        return None
-
+# ── Agent graph helpers ───────────────────────────────────────────────────────
 
 def _build_graph_config(thread_id: str) -> dict[str, Any]:
-    return {
-        "configurable": {"thread_id": thread_id},
-        "recursion_limit": ITERATION_CAP,
-    }
+    return {"configurable": {"thread_id": thread_id}, "recursion_limit": ITERATION_CAP}
 
 
 def _extract_response_text(result: dict[str, Any]) -> str | None:
@@ -112,181 +206,321 @@ def _graph_reply(user_text: str, thread_id: str, user_id: str | None = None) -> 
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
     if user_id:
         payload["user_id"] = user_id
-
     result = graph.invoke(payload, config=_build_graph_config(thread_id))
-
     response_text = _extract_response_text(result)
     if not response_text:
-        return {"text": "I'm having trouble with that. Please try again."}
-
+        return {"text": "I'm having trouble with that. Please try again.", "hangup": False}
     logger.info(f"{thread_id} response: {response_text[:100]}")
-    reply = {"text": response_text}
-    if result.get("should_end", False):
-        reply["hangup"] = True
-    return reply
+    return {"text": response_text, "hangup": result.get("should_end", False)}
 
 
-def _voice_webhook_stream(call_id: str, user_text: str, user_id: str | None = None) -> Iterator[bytes]:
-    payloads: queue.Queue[dict[str, Any] | object] = queue.Queue()
-    interim_sent = threading.Event()
+# ── Twilio Media Streams WebSocket ────────────────────────────────────────────
 
-    def emit(payload: dict[str, Any]) -> None:
-        payloads.put(payload)
+@app.websocket("/twilio/stream")
+async def twilio_stream(ws: WebSocket):
+    """
+    Bidirectional Twilio Media Stream.
 
-    def emit_interim(text: str) -> None:
-        if interim_sent.is_set():
-            return
-        interim_sent.set()
-        emit({"text": text, "interim": True})
+    Per-turn flow:
+      Twilio mulaw 8kHz → Deepgram v2 streaming (your key)
+      → EndOfTurn transcript → LangGraph agent → ElevenLabs mulaw 8kHz → caller
 
-    def worker() -> None:
-        try:
+    Uses Deepgram v2's conversational turn detection:
+    - EagerEndOfTurn  →  start agent early (moderate confidence, lower latency)
+    - TurnResumed     →  cancel if user is still speaking
+    - EndOfTurn       →  definitive finish
+    """
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+
+    if not DEEPGRAM_API_KEY:
+        logger.error("DEEPGRAM_API_KEY not configured — closing stream")
+        await ws.close()
+        return
+
+    stream_sid: str | None = None
+    call_sid: str | None = None
+    from_number: str | None = None
+
+    # Transcripts from Deepgram → agent worker
+    transcript_q: asyncio.Queue[str | None] = asyncio.Queue()
+
+    # ── Agent + TTS worker ────────────────────────────────────────────────────
+
+    async def _agent_worker():
+        while True:
+            transcript = await transcript_q.get()
+            if transcript is None:
+                break
+
+            if not _check_and_register(call_sid or "", transcript):
+                logger.info(f"Duplicate [{call_sid}], skipping")
+                continue
+
             timing.reset()
-            with bind_speak_early_callback(emit_interim):
-                emit(_graph_reply(user_text, call_id, user_id))
-        except GraphRecursionError:
-            emit({"text": "I'm getting a bit turned around. Could you re-state what you need?"})
-        except Exception as e:
-            logger.error(f"Graph failed for {call_id}: {e}", exc_info=True)
-            emit({"text": "Something went wrong. Please try again or ask airport staff for help."})
-        finally:
-            payloads.put(STREAM_QUEUE_SENTINEL)
 
-    threading.Thread(target=worker, name=f"agentphone-{call_id}", daemon=True).start()
+            try:
+                reply = await loop.run_in_executor(
+                    _executor, _graph_reply, transcript, call_sid or "", from_number
+                )
+            except GraphRecursionError:
+                reply = {"text": "I'm getting a bit turned around. Could you re-state what you need?", "hangup": False}
+            except Exception as e:
+                logger.error(f"Agent error [{call_sid}]: {e}", exc_info=True)
+                reply = {"text": "Something went wrong. Please try again or ask airport staff for help.", "hangup": False}
+
+            # Stream ElevenLabs mulaw chunks to Twilio as they arrive.
+            # First chunk lands in ~75ms (turbo TTFB) — caller hears audio
+            # almost immediately rather than waiting for the full response.
+            if stream_sid:
+                try:
+                    chunk_iter = await loop.run_in_executor(
+                        _executor, _tts_mulaw_iter, reply["text"]
+                    )
+                    for chunk in chunk_iter:
+                        if chunk:
+                            await ws.send_json({
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {"payload": base64.b64encode(chunk).decode()},
+                            })
+                except Exception as e:
+                    logger.error(f"Audio stream failed [{call_sid}]: {e}")
+
+            if reply.get("hangup") and _twilio and call_sid:
+                try:
+                    await loop.run_in_executor(
+                        _executor,
+                        lambda: _twilio.calls(call_sid).update(status="completed"),
+                    )
+                except Exception as e:
+                    logger.error(f"Hangup failed [{call_sid}]: {e}")
+
+    worker = asyncio.create_task(_agent_worker())
+
+    # ── Deepgram v2 streaming connection ─────────────────────────────────────
+
+    dg_client = AsyncDeepgramClient(access_token=DEEPGRAM_API_KEY)
 
     try:
-        first_payload = payloads.get(timeout=EARLY_SPEAK_FALLBACK_SECONDS)
-    except queue.Empty:
-        emit_interim(DEFAULT_EARLY_SPEAK_TEXT)
-        first_payload = payloads.get()
+        async with dg_client.listen.v2.connect(
+            model="nova-3",       # latest Deepgram model
+            encoding="mulaw",
+            sample_rate=8000,
+        ) as dg_socket:
 
-    if first_payload is not STREAM_QUEUE_SENTINEL:
-        yield (json.dumps(first_payload) + "\n").encode()
+            # Receive Deepgram transcripts in a background task
+            async def _dg_receiver():
+                async for msg in dg_socket:
+                    if not isinstance(msg, ListenV2TurnInfo):
+                        continue
+                    transcript = msg.transcript.strip()
+                    if not transcript:
+                        continue
+                    # EndOfTurn = user definitely finished speaking
+                    # EagerEndOfTurn = high-confidence early fire (lower latency)
+                    if msg.event in ("EndOfTurn", "EagerEndOfTurn"):
+                        logger.info(f"Deepgram [{msg.event}] [{call_sid}]: '{transcript}'")
+                        await transcript_q.put(transcript)
 
-    while True:
-        payload = payloads.get()
-        if payload is STREAM_QUEUE_SENTINEL:
-            return
-        yield (json.dumps(payload) + "\n").encode()
+            dg_task = asyncio.create_task(_dg_receiver())
+
+            # Forward Twilio audio → Deepgram
+            try:
+                async for raw in ws.iter_text():
+                    msg = json.loads(raw)
+                    event = msg.get("event")
+
+                    if event == "start":
+                        stream_sid = msg["streamSid"]
+                        call_sid = msg["start"]["callSid"]
+                        from_number = msg["start"].get("customParameters", {}).get("from_number")
+                        logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number}")
+
+                    elif event == "media":
+                        await dg_socket.send_media(base64.b64decode(msg["media"]["payload"]))
+
+                    elif event == "stop":
+                        logger.info(f"Stream stopped: {stream_sid}")
+                        break
+
+            except WebSocketDisconnect:
+                logger.info(f"Twilio WebSocket disconnected: {stream_sid}")
+            except Exception as e:
+                logger.error(f"Stream receive error [{stream_sid}]: {e}", exc_info=True)
+            finally:
+                dg_task.cancel()
+                await dg_socket.send_close_stream()
+
+    except Exception as e:
+        logger.error(f"Deepgram connection failed: {e}", exc_info=True)
+    finally:
+        await transcript_q.put(None)  # stop agent worker
+        await worker
+        logger.info(f"Stream cleaned up: {stream_sid}")
 
 
-# ── Webhook ───────────────────────────────────────────────────────────────────
+# ── Voice entry point ─────────────────────────────────────────────────────────
 
-@app.post("/")
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Handle incoming AgentPhone calls and messages."""
+@app.post("/twilio/voice")
+async def twilio_voice_incoming(request: Request):
+    """
+    Called by Twilio when an inbound call arrives.
+    Plays ElevenLabs welcome message, then opens the Media Stream.
+    """
     raw_body = await request.body()
+    params = _parse_form(raw_body)
+    if not _verify_twilio_signature(request, params):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
-    # Verify signature when secret is configured
-    if AGENTPHONE_WEBHOOK_SECRET:
-        signature = request.headers.get("X-Webhook-Signature", "")
-        timestamp = request.headers.get("X-Webhook-Timestamp", "")
-        if not _verify_signature(raw_body, signature, AGENTPHONE_WEBHOOK_SECRET, timestamp):
-            logger.warning("Webhook signature verification failed")
-            raise HTTPException(status_code=401, detail="Invalid signature")
+    call_sid = params.get("CallSid", "unknown")
+    from_number = params.get("From", "unknown")
+    logger.info(f"Incoming call: {call_sid} from {from_number}")
 
-    try:
-        body = json.loads(raw_body)
-    except Exception as e:
-        logger.error(f"Failed to parse webhook body: {e}")
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+    # Fallback mode: use Twilio's built-in speech recognition if Deepgram is not configured.
+    if not DEEPGRAM_API_KEY:
+        welcome = "Welcome to Lincoln Airport. How can I help you today?"
+        vr = _build_gather_twiml(welcome)
+        return Response(content=str(vr), media_type="application/xml")
 
-    event = body.get("event")
-    channel = body.get("channel")
-    data = body.get("data", {})
+    welcome = "Welcome to Lincoln Airport. How can I help you today?"
+    audio_url = await asyncio.get_running_loop().run_in_executor(_executor, _tts_mp3_url, welcome)
 
-    logger.info(f"Webhook: event={event}, channel={channel}")
-
-    # Ignore non-message events (call_ended, status updates, etc.)
-    if event != "agent.message":
-        return {"status": "ok"}
-
-    # Use conversationId if present, fall back to caller's phone number for SMS threads
-    call_id = (
-        data.get("callId")
-        or (data.get("conversationId") or None)
-        or data.get("from")
-        or body.get("agentId")
-    )
-    if not call_id:
-        logger.warning("Missing call ID in payload")
-        raise HTTPException(status_code=400, detail="Missing call ID")
-
-    # Caller's phone number is the stable user identity across sessions
-    user_id = data.get("from") or None
-
-    # Voice uses transcript (string); SMS uses message
-    if channel == "voice":
-        transcript = data.get("transcript", "")
-        user_text = (transcript if isinstance(transcript, str) else "").strip()
+    vr = VoiceResponse()
+    if audio_url:
+        vr.play(audio_url)
     else:
-        user_text = data.get("message", "").strip()
+        vr.say(welcome, voice=_FALLBACK_VOICE)
 
-    if not user_text:
-        logger.warning(f"Empty message for {call_id}")
-        return {"text": "I didn't catch that. Can you repeat?"}
+    ws_url = SERVER_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+    connect = Connect()
+    stream = Stream(url=f"{ws_url}/twilio/stream")
+    stream.parameter(name="from_number", value=from_number)
+    connect.append(stream)
+    vr.append(connect)
 
-    if not _check_and_register(call_id, user_text):
-        logger.info(f"Duplicate request for {call_id}, skipping inference")
-        return {"status": "ok"}
+    return Response(content=str(vr), media_type="application/xml")
 
-    logger.info(f"{call_id}: '{user_text}'")
 
-    if channel == "voice":
-        return StreamingResponse(
-            _voice_webhook_stream(call_id, user_text, user_id),
-            media_type="application/x-ndjson",
-        )
+@app.post("/twilio/voice/process")
+async def twilio_voice_process(request: Request):
+    """
+    Twilio Gather callback for built-in speech recognition fallback mode.
+    """
+    raw_body = await request.body()
+    params = _parse_form(raw_body)
+    if not _verify_twilio_signature(request, params):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
+    call_sid = params.get("CallSid", "unknown")
+    from_number = params.get("From", "unknown")
+    transcript = (params.get("SpeechResult") or "").strip()
+
+    if not transcript:
+        vr = _build_gather_twiml("I didn't catch that. Please say that again.")
+        return Response(content=str(vr), media_type="application/xml")
+
+    loop = asyncio.get_running_loop()
     timing.reset()
-
     try:
-        reply = _graph_reply(user_text, call_id, user_id)
-    except GraphRecursionError:
-        reply = {"text": "I'm getting a bit turned around. Could you re-state what you need?"}
+        reply = await loop.run_in_executor(
+            _executor, _graph_reply, transcript, call_sid, from_number
+        )
+        reply_text = reply.get("text") or "I'm sorry, I had trouble with that."
     except Exception as e:
-        logger.error(f"Graph failed for {call_id}: {e}", exc_info=True)
-        reply = {"text": "Something went wrong. Please try again or ask airport staff for help."}
+        logger.error(f"Twilio gather graph failed [{call_sid}]: {e}", exc_info=True)
+        reply_text = "Something went wrong. Please try again."
+        reply = {"hangup": False}
 
-    reply_text = reply.get("text", "")
-    if reply_text and user_id:
-        _notify_via_agentphone(user_id, reply_text, method="imessage")
+    vr = VoiceResponse()
+    vr.say(reply_text, voice=_FALLBACK_VOICE)
+    if reply.get("hangup"):
+        vr.hangup()
+    else:
+        vr.redirect("/twilio/voice")
+    return Response(content=str(vr), media_type="application/xml")
 
-    return {"status": "ok"}
+
+# ── SMS endpoint ──────────────────────────────────────────────────────────────
+
+@app.post("/twilio/sms")
+async def twilio_sms(request: Request):
+    """Handle incoming SMS messages."""
+    raw_body = await request.body()
+    params = _parse_form(raw_body)
+    if not _verify_twilio_signature(request, params):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    from_number = params.get("From", "")
+    body_text = params.get("Body", "").strip()
+    logger.info(f"SMS from {from_number}: '{body_text}'")
+
+    if not body_text:
+        mr = MessagingResponse()
+        mr.message("I didn't receive your message. Please try again.")
+        return Response(content=str(mr), media_type="application/xml")
+
+    loop = asyncio.get_running_loop()
+    timing.reset()
+    try:
+        reply = await loop.run_in_executor(_executor, _graph_reply, body_text, from_number, from_number)
+    except Exception as e:
+        logger.error(f"SMS graph failed [{from_number}]: {e}", exc_info=True)
+        reply = {"text": "Something went wrong. Please try again."}
+
+    mr = MessagingResponse()
+    mr.message(reply["text"])
+    return Response(content=str(mr), media_type="application/xml")
 
 
-# ── Gate change notifications ─────────────────────────────────────────────────
+# ── Gate change notifications (outbound) ──────────────────────────────────────
+
+class GateChangeRequest(BaseModel):
+    phone: str
+    flight: str
+    old_gate: str
+    new_gate: str
+
 
 @app.post("/gate-change")
 async def gate_change(body: GateChangeRequest):
-    """Notify a passenger of a gate change via outbound call or SMS."""
+    """Notify a passenger of a gate change via outbound call or SMS fallback."""
     message = (
-        f"Hi, this is Oakland Airport. Your flight {body.flight} "
+        f"Hi, this is Lincoln Airport. Your flight {body.flight} "
         f"gate has changed from {body.old_gate} to {body.new_gate}. "
         f"Please proceed to gate {body.new_gate}. Thank you."
     )
 
-    if not AGENTPHONE_API_KEY:
+    if not _twilio or not TWILIO_PHONE_NUMBER:
         logger.info(f"[MOCK] → {body.phone}: {message}")
-        return {
-            "status": "mock_notified",
-            "message": message,
-            "note": "Set AGENTPHONE_API_KEY to send real notifications",
-        }
+        return {"status": "mock_notified", "message": message}
 
-    result = _notify_via_agentphone(body.phone, message, method="call")
-    if result:
-        logger.info(f"Call placed to {body.phone}")
-        return {"status": "called", "result": result}
+    loop = asyncio.get_running_loop()
+    audio_url = await loop.run_in_executor(_executor, _tts_mp3_url, message)
+    twiml = (
+        f"<Response><Play>{audio_url}</Play><Hangup/></Response>"
+        if audio_url
+        else f'<Response><Say voice="{_FALLBACK_VOICE}">{message}</Say><Hangup/></Response>'
+    )
 
-    # Fall back to SMS
-    result = _notify_via_agentphone(body.phone, message, method="imessage")
-    if result:
-        logger.info(f"SMS sent to {body.phone}")
-        return {"status": "sms_sent", "result": result}
+    try:
+        call = await loop.run_in_executor(
+            _executor,
+            lambda: _twilio.calls.create(to=body.phone, from_=TWILIO_PHONE_NUMBER, twiml=twiml),
+        )
+        return {"status": "called", "call_sid": call.sid}
+    except Exception as e:
+        logger.error(f"Outbound call failed: {e}")
 
-    return {"status": "error", "error": "Failed to notify via call or SMS"}
+    try:
+        sms = await loop.run_in_executor(
+            _executor,
+            lambda: _twilio.messages.create(to=body.phone, from_=TWILIO_PHONE_NUMBER, body=message),
+        )
+        return {"status": "sms_sent", "message_sid": sms.sid}
+    except Exception as e:
+        logger.error(f"SMS fallback failed: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

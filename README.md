@@ -1,20 +1,20 @@
-# Lincoln Airport Agent
+ALL CODE IS DISTRIBUTED ON THIS ORGANIZATION's 3 REPOSITORIES. See the other two repositories in this organization for the hydration layer built with MOSS and the custom map builder we created to provide an indoor map of OAK airport to the agent.
 
 AI airport navigation assistant with phone support over Twilio voice + SMS.
 
-## Setup
+Using conversational AI, users can call a phone number and receive real-time navigation, flight updates, accessibility assistance, and personalized recommendations.
 
 1. Install dependencies
 
-```bash
-uv sync
-```
+DeepIndoors can remember that a user:
 
 2. Configure environment
 
-```bash
-cp .env.example .env
-```
+Tech Stack:
+- LangGraph
+- Moss.dev
+- AgentPhone
+- Supermemory
 
 Set these for Twilio local hosting:
 - `TWILIO_ACCOUNT_SID`

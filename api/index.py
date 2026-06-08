@@ -17,13 +17,10 @@ Run locally:
 """
 from __future__ import annotations
 
-import heapq
 import json
 import os
-import re
 import threading
 import time
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -35,7 +32,13 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from supabase import create_client, Client
 
-from agent.db import invalidate_map_cache
+from agent.db import invalidate_map_cache, load_map_levels
+from agent.map_engine import (
+    dijkstra_multilevel as _dijkstra_multilevel,
+    fmt_poi as _fmt_poi,
+    matching_poi_types as _matching_poi_types,
+    search_pois as _search_pois,
+)
 
 load_dotenv()
 
@@ -80,272 +83,6 @@ def _start_session_cleanup_thread() -> None:
     threading.Thread(target=_loop, daemon=True).start()
 
 
-def _load_map_levels(airport_id: str, db: Client) -> list[dict]:
-    """Fetch and slim down map levels from the maps table."""
-    resp = (
-        db.table("maps")
-        .select("name, sort_order, graph_map")
-        .eq("airport_id", airport_id)
-        .order("sort_order")
-        .execute()
-    )
-    levels = []
-    for row in resp.data or []:
-        gm = row.get("graph_map") or {}
-        if not gm.get("pois") and not gm.get("waypoints"):
-            continue
-        levels.append({
-            "name": row["name"],
-            "pois": [
-                {
-                    "id": p["id"],
-                    "name": p.get("name", ""),
-                    "type": p.get("type", ""),
-                    "x": p["x"],
-                    "y": p["y"],
-                    "waypointId": p.get("waypointId", ""),
-                    "linkedPortalIds": [l for l in p.get("linkedPortalIds", []) if l],
-                }
-                for p in gm.get("pois", [])
-            ],
-            "waypoints": [
-                {"id": w["id"], "x": w["x"], "y": w["y"]}
-                for w in gm.get("waypoints", [])
-            ],
-            "edges": [
-                {"from": e["from"], "to": e["to"], "weight": e.get("weight", 1)}
-                for e in gm.get("edges", [])
-            ],
-        })
-    return levels
-
-
-_TYPE_PRIORITY = {
-    "gate": 100, "security": 90, "elevator": 80, "escalator": 75,
-    "stairs": 70, "restroom": 60, "restaurant": 50, "cafe": 50,
-    "coffee": 50, "food": 50, "bar": 45, "lounge": 40, "shop": 30,
-    "bookstore": 30, "atm": 20, "info": 20, "charging": 20,
-    "baggage": 15, "telephone": 10, "aed": 5,
-}
-
-def _poi_priority(poi: dict) -> int:
-    return _TYPE_PRIORITY.get((poi.get("type") or "").lower(), 25)
-
-# ---------------------------------------------------------------------------
-# POI search — Levenshtein + number-exact matching
-# ---------------------------------------------------------------------------
-
-def _levenshtein(a: str, b: str) -> int:
-    a, b = a.lower().strip(), b.lower().strip()
-    if a == b:
-        return 0
-    m, n = len(a), len(b)
-    dp = list(range(n + 1))
-    for i in range(1, m + 1):
-        prev, dp[0] = dp[0], i
-        for j in range(1, n + 1):
-            tmp = dp[j]
-            dp[j] = prev if a[i - 1] == b[j - 1] else 1 + min(prev, dp[j], dp[j - 1])
-            prev = tmp
-    return dp[n]
-
-
-def _search_score(query: str, poi_name: str) -> float:
-    """
-    Levenshtein distance with a hard penalty for number mismatches.
-    'Gate 5' will never match 'Gate 6' — the number sets must be identical.
-    """
-    q_nums = set(re.findall(r"\d+", query))
-    p_nums = set(re.findall(r"\d+", poi_name))
-    if q_nums and q_nums != p_nums:
-        return float("inf")
-    return _levenshtein(query, poi_name)
-
-
-def _matching_poi_types(query: str, levels: list[dict]) -> set[str]:
-    """
-    Resolve a user-provided POI type to actual types present in the map.
-    Substring match first; falls back to Levenshtein within max(2, len/2) so
-    that synonyms / typos like 'bathroom' → 'restroom' still resolve.
-    """
-    types = {
-        (p.get("type") or "").lower().strip()
-        for lvl in levels for p in lvl["pois"]
-        if (p.get("type") or "").strip()
-    }
-    q = query.lower().strip()
-    if not q or not types:
-        return set()
-
-    substring = {t for t in types if q in t or t in q}
-    if substring:
-        return substring
-
-    scored = sorted((_levenshtein(q, t), t) for t in types)
-    best_score = scored[0][0]
-    if best_score <= max(2, len(q) // 2):
-        return {t for s, t in scored if s == best_score}
-    return set()
-
-
-def _search_pois(levels: list[dict], query: str) -> list[dict]:
-    """
-    Search all POIs across all levels, sorted by match score (lower = better).
-    Each result has extra keys: _score, _level_idx, _level_name.
-    """
-    scored = []
-    for i, lvl in enumerate(levels):
-        for p in lvl["pois"]:
-            if not p.get("name"):
-                continue
-            score = _search_score(query, p["name"])
-            if score < float("inf"):
-                scored.append({**p, "_score": score, "_level_idx": i, "_level_name": lvl["name"]})
-    scored.sort(key=lambda x: x["_score"])
-    return scored
-
-
-def _fmt_poi(p: dict) -> dict:
-    return {"id": p["id"], "name": p["name"], "type": p.get("type", ""), "level": p["_level_name"]}
-
-
-PORTAL_COST = 0.5  # weight added for a floor transition
-
-
-def _dijkstra_multilevel(levels: list[dict], start_poi_id: str, end_poi_id: str) -> dict | None:
-    """
-    Shortest path between any two POIs across one or more levels.
-    - Waypoints are the graph nodes (edges connect waypoints within a level).
-    - Portal POIs (elevator/escalator/stairs) add cross-level edges via linkedPortalIds.
-    - POIs enter the graph via their waypointId.
-    Returns {wp_path, poi_stops, distance, level_changes} or None.
-    """
-    # Index all POIs and waypoints across every level
-    poi_map:    dict[str, tuple[int, dict]] = {}  # poi_id  -> (level_idx, poi)
-    wp_level:   dict[str, int]              = {}  # wp_id   -> level_idx
-
-    for i, lvl in enumerate(levels):
-        for p in lvl["pois"]:
-            poi_map[p["id"]] = (i, p)
-        for w in lvl["waypoints"]:
-            wp_level[w["id"]] = i
-
-    start_entry = poi_map.get(start_poi_id)
-    end_entry   = poi_map.get(end_poi_id)
-    if not start_entry or not end_entry:
-        return None
-
-    start_wp = start_entry[1].get("waypointId", "")
-    end_wp   = end_entry[1].get("waypointId", "")
-    if not start_wp or not end_wp:
-        return None
-
-    # Build unified waypoint adjacency
-    adj: dict[str, list] = defaultdict(list)
-
-    for lvl in levels:
-        for e in lvl["edges"]:
-            w = e.get("weight", 1)
-            adj[e["from"]].append((e["to"], w))
-            adj[e["to"]].append((e["from"], w))
-
-    # Add cross-level portal edges (one direction per link; the reverse portal adds the other)
-    for _, (_, poi) in poi_map.items():
-        src_wp = poi.get("waypointId", "")
-        if not src_wp:
-            continue
-        for linked_id in poi.get("linkedPortalIds", []):
-            if not linked_id:
-                continue
-            linked_entry = poi_map.get(linked_id)
-            if not linked_entry:
-                continue
-            dst_wp = linked_entry[1].get("waypointId", "")
-            if dst_wp:
-                adj[src_wp].append((dst_wp, PORTAL_COST))
-
-    # Dijkstra on the unified graph
-    dist: dict[str, float] = {start_wp: 0.0}
-    prev: dict[str, str]   = {}
-    pq = [(0.0, start_wp)]
-
-    while pq:
-        d, u = heapq.heappop(pq)
-        if d > dist.get(u, float("inf")):
-            continue
-        if u == end_wp:
-            break
-        for v, w in adj[u]:
-            nd = d + w
-            if nd < dist.get(v, float("inf")):
-                dist[v] = nd
-                prev[v] = u
-                heapq.heappush(pq, (nd, v))
-
-    if end_wp not in prev and start_wp != end_wp:
-        return None
-
-    # Reconstruct waypoint path
-    wp_path, cur = [], end_wp
-    while cur in prev:
-        wp_path.append(cur)
-        cur = prev[cur]
-    wp_path.append(start_wp)
-    wp_path.reverse()
-
-    # Build wp -> best POI map per level
-    wp_to_best: dict[str, dict] = {}
-    for _, (_, p) in poi_map.items():
-        if not p.get("waypointId") or not p.get("name"):
-            continue
-        wp = p["waypointId"]
-        if wp not in wp_to_best or _poi_priority(p) > _poi_priority(wp_to_best[wp]):
-            wp_to_best[wp] = p
-
-    # Force start/end POIs as first/last stops regardless of priority
-    def make_stop(p: dict, wp_id: str) -> dict:
-        s = dict(p)
-        s["level_name"] = levels[wp_level[wp_id]]["name"] if wp_id in wp_level else ""
-        return s
-
-    # Walk the path, collect stops and detect level changes
-    poi_stops: list[dict] = []
-    level_changes: list[dict] = []
-    seen_wps: set[str] = set()
-    prev_level: int | None = None
-
-    for i, wp_id in enumerate(wp_path):
-        if wp_id in seen_wps:
-            continue
-        seen_wps.add(wp_id)
-
-        cur_level = wp_level.get(wp_id)
-        if cur_level is not None and prev_level is not None and cur_level != prev_level:
-            level_changes.append({
-                "from_level": levels[prev_level]["name"],
-                "to_level":   levels[cur_level]["name"],
-            })
-        if cur_level is not None:
-            prev_level = cur_level
-
-        is_first = (i == 0)
-        is_last  = (i == len(wp_path) - 1)
-
-        if is_first:
-            poi_stops.append(make_stop(start_entry[1], wp_id))
-        elif is_last:
-            poi_stops.append(make_stop(end_entry[1], wp_id))
-        elif wp_id in wp_to_best:
-            poi_stops.append(make_stop(wp_to_best[wp_id], wp_id))
-
-    return {
-        "wp_path":      wp_path,
-        "poi_stops":    poi_stops,
-        "distance":     dist.get(end_wp, 0),
-        "level_changes": level_changes,
-    }
-
-
 def _print_map_data():
     if not supabase or not AIRPORT_ID:
         return
@@ -358,7 +95,7 @@ def _print_map_data():
         print(f"  No airport found with id='{AIRPORT_ID}'")
     else:
         print(f"\n  {airport['id']}  {airport.get('name', '')}")
-        maps = _load_map_levels(AIRPORT_ID, supabase)
+        maps = load_map_levels(AIRPORT_ID)
         if maps:
             print(f"\n  Levels ({len(maps)}):")
             for m in maps:
@@ -390,7 +127,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.post("/update/{airport_id}")
 def update_map_cache(airport_id: str):
     """Refresh map cache from Supabase."""
-    from agent.db import load_map_levels
     invalidate_map_cache(airport_id)
     levels = load_map_levels(airport_id)
     return {
@@ -915,7 +651,7 @@ def map_view(airport_id: str):
     db = require_supabase()
     airport_resp = db.table("airports").select("name").eq("id", airport_id).limit(1).execute()
     airport_name = airport_resp.data[0]["name"] if airport_resp.data else airport_id
-    levels = _load_map_levels(airport_id, db)
+    levels = load_map_levels(airport_id)
     if not levels:
         raise HTTPException(status_code=404, detail=f"No map data found for '{airport_id}'.")
     return _build_map_html(airport_name, levels)
@@ -938,8 +674,7 @@ def find_poi(airport_id: str, q: str):
         Ambiguous     → { found: false, ambiguous: true, message, matches: [...] }
         Not found     → { found: false, message }
     """
-    db = require_supabase()
-    levels = _load_map_levels(airport_id, db)
+    levels = load_map_levels(airport_id)
     results = _search_pois(levels, q)
 
     if not results:
@@ -985,8 +720,7 @@ def resolve_poi(body: ResolvePOIRequest):
     Response:
         { found: true, id, name, type, level }
     """
-    db = require_supabase()
-    levels = _load_map_levels(body.airport_id, db)
+    levels = load_map_levels(body.airport_id)
 
     # Find all candidates for the primary name
     candidates = _search_pois(levels, body.name)
@@ -1060,8 +794,7 @@ def find_nearest(body: FindNearestRequest):
         Not found → { found: false, message }
     """
     airport_id, source_id, poi_type = body.airport_id, body.source_id, body.poi_type
-    db = require_supabase()
-    levels = _load_map_levels(airport_id, db)
+    levels = load_map_levels(airport_id)
     if not levels:
         raise HTTPException(status_code=404, detail=f"No map data for '{airport_id}'.")
 
@@ -1124,8 +857,7 @@ def route(airport_id: str, start_id: str, end_id: str):
         stops        — ordered named POIs along the route (no waypoints), including node type
         level_changes — [{from_level, to_level}] each time the floor changes
     """
-    db = require_supabase()
-    levels = _load_map_levels(airport_id, db)
+    levels = load_map_levels(airport_id)
     if not levels:
         raise HTTPException(status_code=404, detail=f"No map data for '{airport_id}'.")
 
@@ -1155,204 +887,6 @@ def root():
     return {"status": "Airflow API is running."}
 
 
-# ---------------------------------------------------------------------------
-# Session / route helpers
-# ---------------------------------------------------------------------------
-
-def _format_route_speech(raw: dict) -> str:
-    """Compact, LLM-readable route summary — avoids JSON structure without losing information."""
-    if not raw.get("found"):
-        return "No route found."
-
-    stops = raw.get("stops", [])
-    mins = raw.get("estimated_minutes", 1)
-    changes = raw.get("level_changes", [])
-
-    def fmt_stop(s: dict) -> str:
-        level = s.get("level", "")
-        node_type = s.get("type", "")
-        details = ", ".join(part for part in [node_type, level] if part)
-        return f"{s['name']} ({details})" if details else s["name"]
-
-    path = " → ".join(f"Step {i+1}: {fmt_stop(s)}" for i, s in enumerate(stops))
-    floor_note = " | floor change: " + ", ".join(
-        f"{c['from_level']} → {c['to_level']}" for c in changes
-    ) if changes else ""
-
-    return f"~{mins} min | {path}{floor_note}"
-
-
-# ---------------------------------------------------------------------------
-# Agent session helpers
-# ---------------------------------------------------------------------------
-
-def _get_or_create_session(call_id: str, phone_number: Optional[str], airport_id: str) -> dict:
-    db = require_supabase()
-    resp = db.table("agent_sessions").select("*").eq("call_id", call_id).limit(1).execute()
-    if resp.data:
-        return resp.data[0]
-    new = db.table("agent_sessions").insert({
-        "call_id": call_id,
-        "phone_number": phone_number,
-        "airport_id": airport_id,
-        "route_stops": [],
-        "route_step_index": 0,
-    }).execute()
-    return new.data[0]
-
-
-def _upsert_session_route(
-    call_id: str,
-    phone_number: Optional[str],
-    airport_id: str,
-    stops: list[dict],
-) -> None:
-    db = require_supabase()
-    _get_or_create_session(call_id, phone_number, airport_id)
-    first = stops[0] if stops else {}
-    last  = stops[-1] if stops else {}
-    db.table("agent_sessions").update({
-        "route_stops":           stops,
-        "route_step_index":      0,
-        "current_poi_id":        first.get("id"),
-        "current_poi_name":      first.get("name"),
-        "destination_poi_id":    last.get("id"),
-        "destination_poi_name":  last.get("name"),
-        "airport_id":            airport_id,
-    }).eq("call_id", call_id).execute()
-
-
-def _format_session_summary(session: dict) -> str:
-    parts = []
-    if session.get("current_poi_name"):
-        parts.append(f"Current location: {session['current_poi_name']} (id: {session.get('current_poi_id', '?')})")
-    if session.get("destination_poi_name"):
-        parts.append(f"Destination: {session['destination_poi_name']} (id: {session.get('destination_poi_id', '?')})")
-    stops = session.get("route_stops") or []
-    idx   = session.get("route_step_index", 0)
-    if stops and idx < len(stops):
-        next_stop = stops[idx]
-        parts.append(f"Route step: {idx + 1}/{len(stops)} — {next_stop.get('name', '?')} (id: {next_stop.get('id', '?')})")
-    elif stops:
-        parts.append(f"Route step: complete")
-    return " | ".join(parts) if parts else "No active navigation session."
-
-
-def _handle_get_session(call_id: Optional[str]) -> str:
-    if not call_id:
-        return "No active session. Call get_route to start navigation."
-    db = require_supabase()
-    resp = db.table("agent_sessions").select("*").eq("call_id", call_id).limit(1).execute()
-    if not resp.data:
-        return "No active session. Call get_route to start navigation."
-    return _format_session_summary(resp.data[0])
-
-
-def _handle_get_history(phone_number: Optional[str]) -> str:
-    if not phone_number:
-        return "No phone number available — cannot retrieve history."
-    db = require_supabase()
-    rows = (
-        db.table("agent_sessions")
-        .select("destination_poi_name, destination_poi_id, current_poi_name, current_poi_id, route_stops, route_step_index, created_at, airport_id")
-        .eq("phone_number", phone_number)
-        .order("created_at", desc=True)
-        .limit(5)
-        .execute()
-    )
-    if not rows.data:
-        return "No previous visits found."
-    lines = []
-    for s in rows.data:
-        dest = s.get("destination_poi_name") or "unknown destination"
-        stops = s.get("route_stops") or []
-        idx   = s.get("route_step_index", 0)
-        completed = idx >= len(stops) - 1 if stops else False
-        status = "completed" if completed else f"step {idx + 1}/{len(stops)}"
-        date = (s.get("created_at") or "")[:10]
-        current = s.get("current_poi_name") or "unknown location"
-        current_id = s.get("current_poi_id", "?")
-        dest_id = s.get("destination_poi_id", "?")
-        lines.append(f"{date}: {s.get('airport_id', '?')} — last at {current} (id: {current_id}), headed to {dest} (id: {dest_id}) [{status}]")
-    return "\n".join(lines)
-
-
-def _handle_update_location(call_id: Optional[str], args: dict) -> str:
-    if not call_id:
-        return "Cannot update location — no session call ID."
-    poi_id   = args.get("poi_id", "")
-    poi_name = args.get("poi_name", "")
-    if not poi_id:
-        return "poi_id is required."
-    db = require_supabase()
-    db.table("agent_sessions").update({
-        "current_poi_id":   poi_id,
-        "current_poi_name": poi_name,
-    }).eq("call_id", call_id).execute()
-    return f"Location updated to {poi_name}."
-
-
-def _handle_set_destination(call_id: Optional[str], phone_number: Optional[str], airport_id: str, args: dict) -> str:
-    if not call_id:
-        return "Cannot set destination — no session call ID."
-    poi_id   = args.get("poi_id", "")
-    poi_name = args.get("poi_name", "")
-    if not poi_id:
-        return "poi_id is required."
-    db = require_supabase()
-    resp = db.table("agent_sessions").select("call_id").eq("call_id", call_id).limit(1).execute()
-    if resp.data:
-        db.table("agent_sessions").update({
-            "destination_poi_id":   poi_id,
-            "destination_poi_name": poi_name,
-        }).eq("call_id", call_id).execute()
-    else:
-        db.table("agent_sessions").insert({
-            "call_id":               call_id,
-            "phone_number":          phone_number,
-            "airport_id":            airport_id,
-            "destination_poi_id":    poi_id,
-            "destination_poi_name":  poi_name,
-            "route_stops":           [],
-            "route_step_index":      0,
-        }).execute()
-    return f"Destination set to {poi_name}."
-
-
-def _handle_advance_step(call_id: Optional[str]) -> str:
-    if not call_id:
-        return "Cannot advance step — no session call ID."
-    db = require_supabase()
-    resp = db.table("agent_sessions").select("*").eq("call_id", call_id).limit(1).execute()
-    if not resp.data:
-        return "No active navigation session found."
-    session = resp.data[0]
-    stops   = session.get("route_stops") or []
-    idx     = session.get("route_step_index", 0)
-    new_idx = idx + 1
-    if not stops:
-        return "No route is active. Call get_route first."
-    if new_idx >= len(stops):
-        return f"You have arrived at your destination: {session.get('destination_poi_name', 'the destination')}. Navigation complete."
-    confirmed_stop = stops[new_idx]
-    db.table("agent_sessions").update({
-        "route_step_index": new_idx,
-        "current_poi_id":   confirmed_stop.get("id"),
-        "current_poi_name": confirmed_stop.get("name"),
-    }).eq("call_id", call_id).execute()
-    if new_idx == len(stops) - 1:
-        return f"You have arrived at your destination: {confirmed_stop.get('name')}. Navigation complete."
-    next_stop = stops[new_idx + 1]
-    remaining = len(stops) - new_idx - 2
-    return (
-        f"Confirmed at {confirmed_stop.get('name')} (id: {confirmed_stop.get('id')}). "
-        f"Next: {next_stop.get('name')} "
-        f"({next_stop.get('type', '')}, {next_stop.get('level', '')}). "
-        f"{remaining} stop(s) remaining."
-    )
-
-
-
 
 # ---------------------------------------------------------------------------
 # Get nodes
@@ -1361,8 +895,7 @@ def _handle_advance_step(call_id: Optional[str]) -> str:
 @app.get("/get-nodes")
 def get_nodes(airport_id: str, floor_name: Optional[str] = None):
     """Return POI nodes for an airport, optionally filtered by floor name."""
-    db = require_supabase()
-    levels = _load_map_levels(airport_id, db)
+    levels = load_map_levels(airport_id)
     nodes = []
     for lvl in levels:
         if floor_name and lvl["name"] != floor_name:

@@ -46,8 +46,7 @@ def search_memories(user_id: str, query: str) -> str:
         if relevant:
             return "Relevant memories:\n" + "\n".join(f"- {m}" for m in relevant)
         return "No relevant user memories found."
-    except Exception as e:
-        pass
+    except Exception:
         return "No relevant user memories found."
 
 
@@ -78,8 +77,7 @@ def get_last_location(user_id: str) -> str | None:
                     if line.startswith("poi_id:"):
                         return line[len("poi_id:"):].strip()
         return None
-    except Exception as e:
-        pass
+    except Exception:
         return None
 
 
@@ -107,7 +105,6 @@ def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
                 if doc_id:
                     try:
                         _client.documents.delete(id=doc_id)
-                        pass
                     except Exception:
                         pass
 
@@ -116,8 +113,7 @@ def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
             container_tag=container_tag,
             custom_id=custom_id,
         )
-        pass
-    except Exception as e:
+    except Exception:
         pass
 
 
@@ -137,8 +133,7 @@ def get_last_flight(user_id: str) -> str | None:
                     if line.startswith("flight_number:"):
                         return line[len("flight_number:"):].strip()
         return None
-    except Exception as e:
-        pass
+    except Exception:
         return None
 
 
@@ -157,11 +152,9 @@ def update_flight(user_id: str, flight_number: str) -> None:
                 doc_id = _value(doc, "id", None)
                 if doc_id:
                     _client.documents.update(id=doc_id, content=content)
-                    pass
                     return
         _client.documents.add(content=content, container_tag=container_tag, custom_id=custom_id)
-        pass
-    except Exception as e:
+    except Exception:
         pass
 
 
@@ -184,9 +177,7 @@ def save_conversation(user_id: str, messages: list) -> None:
     try:
         container_tag = _sanitize_container_tag(user_id)
         if not container_tag:
-            pass
             return
         _client.add(content="\n".join(lines), container_tag=container_tag)
-        pass
-    except Exception as e:
+    except Exception:
         pass

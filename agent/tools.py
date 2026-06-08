@@ -9,7 +9,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from agent.config import DEFAULT_AIRPORT
+from agent.config import DEFAULT_AIRPORT, MEMORY_ENABLED
 from agent.timing import add_moss, add_supermemory
 from agent.db import load_map_levels
 from agent.map_engine import (
@@ -348,6 +348,8 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
     """Look up persistent facts about this user: food preferences, payment cards, loyalty programs,
     accessibility needs, lifestyle habits, and location patterns. Call this before recommending a
     category of POI or when you want to personalize navigation for this user."""
+    if not MEMORY_ENABLED:
+        return "Memory is currently disabled."
     user_id = state.get("user_id")
     if not user_id:
         return "No user identity available — cannot retrieve personalized memories."
@@ -361,6 +363,8 @@ def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str
 @tool(args_schema=SearchMossPoisInput)
 def search_moss_pois(query: str) -> str:
     """Semantic search only over the `oakland-pois` Moss index."""
+    if not MEMORY_ENABLED:
+        return "Moss search is currently disabled."
     print("[thinking with moss]")
     t0 = time.time()
     result = moss_semantic_search_pois(query=query, top_k=7)
@@ -371,6 +375,8 @@ def search_moss_pois(query: str) -> str:
 @tool(args_schema=SearchMossFlightsInput)
 def search_moss_flights(query: str) -> str:
     """Semantic search only over the `oakland-flights` Moss index."""
+    if not MEMORY_ENABLED:
+        return "Moss search is currently disabled."
     print("[thinking with moss]")
     t0 = time.time()
     result = moss_semantic_search_flights(query=query, top_k=7)

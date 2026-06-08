@@ -244,7 +244,13 @@ def _verify_twilio_signature(request: Request, params: dict[str, str]) -> bool:
         return urls
 
     candidates = _candidates()
-    logger.info("Twilio sig check — trying URLs: %s", candidates)
+    logger.info(
+        "Twilio sig check — token_prefix=%s sig=%s params=%s urls=%s",
+        TWILIO_AUTH_TOKEN[:6] if TWILIO_AUTH_TOKEN else "NONE",
+        signature[:10] if signature else "NONE",
+        dict(list(params.items())[:3]),
+        candidates,
+    )
     for url in candidates:
         if _validator.validate(url, params, signature):
             return True

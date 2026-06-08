@@ -1,4 +1,3 @@
-import json
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -9,13 +8,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from agent.config import MEMORY_ENABLED
 from agent.llm import build_llm
-from agent.memory import get_last_flight, get_last_location, save_conversation, search_memories
-from agent.moss_search import search_moss_pois as moss_semantic_search_pois
+from agent.memory import get_last_flight, get_last_location
 from agent.prompts import build_system_prompt
 from agent.state import State
-from agent.timing import add_llm, add_moss, add_supermemory, add_tool
+from agent.timing import add_llm, add_tool
 from agent.tools import TOOLS
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
@@ -38,17 +35,13 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Let me figure out which one you mean.",
         "Checking which floor that's on.",
     ],
-    "search_user_memory": [
-        "Let me check your preferences.",
-        "Looking up what I know about you.",
-    ],
     "get_nodes": [
         "Pulling up the airport map.",
         "Loading the map for you.",
     ],
     "set_nav_state": [],  # silent — just a state update
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "search_user_memory", "get_nodes"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "get_nodes"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",
@@ -138,89 +131,6 @@ def _repair_node(state: State):
 
 # ================= commerce prefetch =================
 
-_FOOD_SIGNALS = {
-    "halal", "vegetarian", "vegan", "kosher", "gluten-free", "gluten free",
-    "chicken", "fish", "seafood", "beef", "italian", "chinese", "japanese",
-    "mexican", "indian", "thai", "mediterranean", "sushi", "pizza", "burger",
-    "sandwich", "salad", "coffee", "cafe", "bakery",
-}
-_PAYMENT_SIGNALS = {
-    "american express", "amex", "chase sapphire", "chase", "visa", "mastercard",
-    "apple pay", "google pay", "priority pass", "dragon pass", "capital one",
-}
-
-
-def _extract_moss_signals(prefs: str) -> str:
-    """Pull clean food + payment keywords out of Supermemory bullet text so the
-    Moss query is focused signals, not a raw blob of preference prose."""
-    lower = prefs.lower()
-    hits: list[str] = []
-    for kw in _FOOD_SIGNALS:
-        if kw in lower:
-            hits.append(kw)
-    for kw in _PAYMENT_SIGNALS:
-        if kw in lower:
-            hits.append(kw)
-    return " ".join(hits) if hits else "food restaurant"
-
-
-_COMMERCE_KEYWORDS = {
-    "restaurant", "cafe", "coffee", "food", "eat", "hungry", "drink", "bar",
-    "lounge", "shop", "store", "duty-free", "dutyfree", "newsstand", "buy",
-    "purchase", "pay", "snack", "lunch", "dinner", "breakfast", "meal",
-    "sandwich", "pizza", "sushi", "burger", "salad", "bakery", "juice",
-    "smoothie", "beer", "wine", "cocktail", "market", "kiosk",
-}
-
-
-def _has_commerce_intent(state: State) -> bool:
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
-            text = (msg.content if isinstance(msg.content, str) else str(msg.content)).lower()
-            return any(kw in text for kw in _COMMERCE_KEYWORDS)
-    return False
-
-
-def _commerce_prefetch_node(state: State) -> dict:
-    """Enforce the commerce workflow: when the user's message has commerce intent,
-    pre-fetch (1) payment preferences from Supermemory, then (2) use those preferences
-    to build a richer Moss query so results are already filtered by what the user likes.
-    Results land in state.commerce_context so the system prompt injects them directly —
-    the LLM never has a chance to skip either call."""
-    if not MEMORY_ENABLED:
-        return {"commerce_context": None}
-    if not _has_commerce_intent(state):
-        return {"commerce_context": None}
-
-    t0 = time.time()
-
-    parts: list[str] = []
-    prefs: str | None = None
-
-    # Step 1: payment + food preferences from Supermemory
-    user_id = state.get("user_id")
-    if user_id:
-        print("[thinking with supermemory]")
-        t1 = time.time()
-        prefs = search_memories(
-            user_id,
-            "food preferences dietary restrictions payment cards Apple Pay loyalty programs",
-        )
-        add_supermemory(time.time() - t1)
-        if prefs and "no memories" not in prefs.lower():
-            parts.append(f"PAYMENT_PREFERENCES:\n{prefs}")
-
-    # Step 2: extract clean signals from prefs and drive the Moss query with them
-    signals = _extract_moss_signals(prefs) if prefs else "food restaurant"
-    moss_query = f"restaurant food {signals}"
-    print("[thinking with moss]")
-    t2 = time.time()
-    pois = moss_semantic_search_pois(query=moss_query, top_k=5)
-    add_moss(time.time() - t2)
-    if pois:
-        parts.append(f"COMMERCE_POIS:\n{json.dumps(pois, ensure_ascii=True)}")
-    return {"commerce_context": "\n\n".join(parts) if parts else None}
-
 
 # ================= subgraph builder =================
 
@@ -276,12 +186,10 @@ def _timed_tools(state: State):
 
 def _build_subgraph(phase: str):
     builder = StateGraph(State)
-    builder.add_node("commerce_prefetch", _commerce_prefetch_node)
     builder.add_node("agent", _make_agent(phase))
     builder.add_node("tools", _timed_tools)
     builder.add_node("repair", _repair_node)
-    builder.add_edge(START, "commerce_prefetch")
-    builder.add_edge("commerce_prefetch", "agent")
+    builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", tools_condition)
     builder.add_conditional_edges(
         "tools", _check_tool_errors, {"repair": "repair", "agent": "agent"}
@@ -296,14 +204,11 @@ _DECLINE_PHRASES = ("no thanks", "that's all", "i'm good", "bye", "goodbye", "no
 
 
 def _closure_node(state: State) -> dict:
-    """Check if the user's latest message is a decline. If so, save conversation and set should_end."""
+    """Check if the user's latest message is a decline. If so, set should_end."""
     for msg in reversed(state["messages"]):
         if isinstance(msg, HumanMessage):
             lower = (msg.content if isinstance(msg.content, str) else str(msg.content)).lower().strip()
             if any(lower == p or lower.startswith(p) for p in _DECLINE_PHRASES):
-                user_id = state.get("user_id")
-                if user_id:
-                    save_conversation(user_id, state["messages"])
                 return {"should_end": True}
             break
     return {}
@@ -312,23 +217,16 @@ def _closure_node(state: State) -> dict:
 # ================= init (location pre-load) =================
 
 def _init_node(state: State) -> dict:
-    """At conversation start, restore the user's last known location and flight from Supermemory."""
-    if not MEMORY_ENABLED:
-        return {}
     user_id = state.get("user_id")
     if not user_id:
         return {}
     result: dict = {}
     if not state.get("current_location"):
-        t0 = time.time()
         poi_id = get_last_location(user_id)
-        add_supermemory(time.time() - t0)
         if poi_id:
             result["current_location"] = poi_id
     if not state.get("flight_number"):
-        t0 = time.time()
         flight = get_last_flight(user_id)
-        add_supermemory(time.time() - t0)
         if flight:
             result["flight_number"] = flight
     return result

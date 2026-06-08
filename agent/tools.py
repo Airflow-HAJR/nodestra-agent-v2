@@ -1,5 +1,4 @@
 import json
-import time
 from typing import Annotated, List, Optional
 
 from langchain.tools import tool
@@ -9,8 +8,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from agent.config import DEFAULT_AIRPORT, MEMORY_ENABLED
-from agent.timing import add_moss, add_supermemory
+from agent.config import DEFAULT_AIRPORT
 from agent.db import load_map_levels
 from agent.map_engine import (
     dijkstra_multilevel,
@@ -19,11 +17,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.memory import get_last_location, get_last_flight, search_memories, update_flight, update_location
-from agent.moss_indexing import index_moss_flights as moss_index_flights
-from agent.moss_indexing import index_moss_pois as moss_index_pois
-from agent.moss_search import search_moss_flights as moss_semantic_search_flights
-from agent.moss_search import search_moss_pois as moss_semantic_search_pois
+from agent.memory import get_last_location, update_flight, update_location
 
 
 # ---------------------------------------------------------------------------
@@ -59,23 +53,6 @@ class FindNearestInput(BaseModel):
     poi_type: str = Field(description="Type of POI to find, e.g. 'restroom', 'gate', 'lounge'")
     airport_id: str = Field(default=DEFAULT_AIRPORT)
 
-
-class SearchUserMemoryInput(BaseModel):
-    query: str = Field(
-        description="Natural language query describing what user preference or context to look up, "
-                    "e.g. 'food preferences', 'payment cards and lounge access', 'mobility or accessibility needs'"
-    )
-
-class SearchMossPoisInput(BaseModel):
-    query: str = Field(description="Semantic search query over the Oakland POI Moss index")
-
-
-class SearchMossFlightsInput(BaseModel):
-    query: str = Field(description="Semantic search query over the Oakland flights Moss index")
-
-
-class IndexMossInput(BaseModel):
-    airport_id: str = Field(default=DEFAULT_AIRPORT, description="Airport code to index, e.g. OAK")
 
 
 # ---------------------------------------------------------------------------
@@ -172,9 +149,7 @@ def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: An
     if state_loc and state_loc != start:
         start = state_loc
     elif user_id:
-        t0 = time.time()
         fresh = get_last_location(user_id)
-        add_supermemory(time.time() - t0)
         if fresh and fresh != start:
             start = fresh
 
@@ -223,9 +198,7 @@ def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, 
     print("[thinking]")
     user_id = state.get("user_id") if state else None
     if user_id:
-        t0 = time.time()
         fresh = get_last_location(user_id)
-        add_supermemory(time.time() - t0)
         if fresh and fresh != source:
             source = fresh
 
@@ -317,7 +290,7 @@ def set_nav_state(
 
 
 # ---------------------------------------------------------------------------
-# Memory tool (Supermemory — personalization)
+# Flight state tool
 # ---------------------------------------------------------------------------
 
 class SetFlightInput(BaseModel):
@@ -330,72 +303,15 @@ def set_flight_number(
     state: Annotated[dict, InjectedState],
     flight_number: str,
 ) -> Command:
-    """Save the user's flight number to state and Supermemory so it persists across conversations."""
-    print("[thinking with supermemory]")
+    """Save the user's flight number to state."""
+    print("[thinking]")
     user_id = state.get("user_id")
     if user_id:
-        t0 = time.time()
         update_flight(user_id, flight_number)
-        add_supermemory(time.time() - t0)
     return Command(update={
         "flight_number": flight_number,
         "messages": [ToolMessage(content=f"Flight number set to {flight_number}", tool_call_id=tool_call_id)],
     })
-
-
-@tool(args_schema=SearchUserMemoryInput)
-def search_user_memory(query: str, state: Annotated[dict, InjectedState]) -> str:
-    """Look up persistent facts about this user: food preferences, payment cards, loyalty programs,
-    accessibility needs, lifestyle habits, and location patterns. Call this before recommending a
-    category of POI or when you want to personalize navigation for this user."""
-    if not MEMORY_ENABLED:
-        return "Memory is currently disabled."
-    user_id = state.get("user_id")
-    if not user_id:
-        return "No user identity available — cannot retrieve personalized memories."
-    print("[thinking with supermemory]")
-    t0 = time.time()
-    result = search_memories(user_id, query)
-    add_supermemory(time.time() - t0)
-    return result
-
-
-@tool(args_schema=SearchMossPoisInput)
-def search_moss_pois(query: str) -> str:
-    """Semantic search only over the `oakland-pois` Moss index."""
-    if not MEMORY_ENABLED:
-        return "Moss search is currently disabled."
-    print("[thinking with moss]")
-    t0 = time.time()
-    result = moss_semantic_search_pois(query=query, top_k=7)
-    add_moss(time.time() - t0)
-    return json.dumps(result, ensure_ascii=True)
-
-
-@tool(args_schema=SearchMossFlightsInput)
-def search_moss_flights(query: str) -> str:
-    """Semantic search only over the `oakland-flights` Moss index."""
-    if not MEMORY_ENABLED:
-        return "Moss search is currently disabled."
-    print("[thinking with moss]")
-    t0 = time.time()
-    result = moss_semantic_search_flights(query=query, top_k=7)
-    add_moss(time.time() - t0)
-    return json.dumps(result, ensure_ascii=True)
-
-
-@tool(args_schema=IndexMossInput)
-def index_moss_pois(airport_id: str = DEFAULT_AIRPORT) -> str:
-    """Build or refresh the Moss POI index for the airport."""
-    print("[thinking with moss]")
-    return json.dumps(moss_index_pois(airport_id=airport_id), ensure_ascii=True)
-
-
-@tool(args_schema=IndexMossInput)
-def index_moss_flights(airport_id: str = DEFAULT_AIRPORT) -> str:
-    """Build or refresh the Moss flight index for the airport."""
-    print("[thinking with moss]")
-    return json.dumps(moss_index_flights(airport_id=airport_id), ensure_ascii=True)
 
 
 TOOLS = [
@@ -406,9 +322,4 @@ TOOLS = [
     find_nearest,
     set_nav_state,
     set_flight_number,
-    search_user_memory,
-    search_moss_pois,
-    search_moss_flights,
-    index_moss_pois,
-    index_moss_flights,
 ]

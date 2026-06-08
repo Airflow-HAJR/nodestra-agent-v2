@@ -30,13 +30,6 @@ DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
 # Public base URL of this server (needed for Twilio to fetch <Play> audio)
 SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "http://localhost:8000")
 
-# Supermemory (persistent user personalization)
-SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")
-
-# Moss semantic search
-MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID", "")
-MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY", "")
-
 # Cartesia TTS
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID", "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4")
@@ -45,5 +38,3 @@ CARTESIA_MODEL_ID = os.environ.get("CARTESIA_MODEL_ID", "sonic-3.5")
 # TTS provider: "elevenlabs" | "cartesia"
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "elevenlabs")
 
-# Feature flags
-MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"

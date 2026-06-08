@@ -10,7 +10,7 @@ NAV STATE: {nav}
 CURRENT TIME: May 17, 12:00 pm
 
 PHASE FOCUS: {phase_focus}
-{error_block}{commerce_block}
+{error_block}
 Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
 
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
@@ -21,17 +21,7 @@ Tool use:
 - get_route: two POI ids.
 - resolve_poi: only when find_poi returns multiple candidates.
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
-- set_flight_number: call this as soon as the user mentions their flight number. Saves it to state and Supermemory so it persists across conversations.
-- search_user_memory: call this before recommending a category of POI, when the user expresses an open-ended need (e.g. "I'm hungry", "I want to relax", "need a drink"), or when the task involves any place where payment is expected (shops, restaurants, cafes, lounges, duty-free, newsstands, etc.) — in that case also search for payment preferences so you can surface relevant cards, Apple Pay support, or loyalty programs. You MUST act on what it returns: if it surfaces a preferred cuisine, use that to pick a restaurant; if it shows a credit card with lounge access, proactively mention the lounge; if it flags accessibility needs, route accordingly. Never silently apply a preference — always name it and attribute it out loud. Attribution rules: (1) If the memory text names a specific venue, ALWAYS attribute to that venue — e.g. "Based on your previous visit to Chase Center, you seem to prefer halal food…" or "Last time at Levi's Stadium you took the elevator, so I've routed you that way." (2) Only fall back to "based on your profile" or "based on your preferences" when the memory contains no venue name. Do NOT call it for navigation steps the user has explicitly stated.
-- search_moss_pois: semantic search only over `oakland-pois` for open-ended POI and amenity questions where fuzzy name lookup is insufficient. Keep query text short and natural (e.g. "Italian food restaurant"), and do NOT include airport identifiers like "OAK" in the search query.
-- search_moss_flights: semantic search only over `oakland-flights` for open-ended flight questions such as destination, gate, or flight status lookups.
-- index_moss_pois: build or refresh the `oakland-pois` Moss index when POI search data appears stale or missing.
-- index_moss_flights: build or refresh the `oakland-flights` Moss index when flight search data appears stale or missing.
-
-Commerce workflow (stores, restaurants, cafes, lounges, duty-free, newsstands, or any venue where payment is expected):
-1. search_user_memory for payment preferences (cards, Apple Pay, loyalty programs, dietary needs).
-2. search_moss_pois to find matching venues — use the preference as query context (e.g. "halal restaurant", "cafe accepts Amex").
-3. Surface only venues that align with the returned preferences. Always attribute out loud: name the preference and its source.
+- set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
 
 Routing flow:
 1. User states destination → find_poi → set_nav_state(final_destination=<id>).
@@ -86,23 +76,10 @@ def build_system_prompt(state: State, phase: str = "navigate") -> str:
         if err
         else ""
     )
-    commerce = state.get("commerce_context")
-    commerce_block = (
-        f"\nCOMMERCE CONTEXT (pre-fetched this turn — act on it immediately):\n{commerce}\n"
-        "COMMERCE INSTRUCTIONS (voice — 2-3 sentences max, NO lists, NO markdown, NO bullet points):\n"
-        "Open with one sentence that names the key preference AND its source venue if one appears in "
-        "PAYMENT_PREFERENCES (e.g. 'Based on your halal preference and your last visit to Chase Center '  "
-        "where you paid with Amex...'). Then name 2 options from COMMERCE_POIS in that same flowing sentence "
-        "or the next. If any POI has a standout benefit for the user (cashback, Priority Pass, dining credit), "
-        "call it out explicitly in the final sentence. End with 'Want directions to one of them?'\n"
-        if commerce
-        else ""
-    )
     current_time = datetime.now().strftime("%I:%M %p")
     return SYSTEM_TEMPLATE.format(
         nav=nav,
         phase_focus=focus,
         error_block=error_block,
-        commerce_block=commerce_block,
         current_time=current_time,
     )

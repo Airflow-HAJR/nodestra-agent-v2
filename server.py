@@ -243,7 +243,9 @@ def _verify_twilio_signature(request: Request, params: dict[str, str]) -> bool:
 
         return urls
 
-    for url in _candidates():
+    candidates = _candidates()
+    logger.info("Twilio sig check — trying URLs: %s", candidates)
+    for url in candidates:
         if _validator.validate(url, params, signature):
             return True
 

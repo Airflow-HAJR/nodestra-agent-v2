@@ -221,20 +221,30 @@ def _verify_twilio_signature(request: Request, params: dict[str, str]) -> bool:
         logger.warning("TWILIO_AUTH_TOKEN not set — skipping signature verification")
         return True
     signature = request.headers.get("X-Twilio-Signature", "")
-    request_url = str(request.url)
 
-    # Try the raw request URL first.
-    if _validator.validate(request_url, params, signature):
-        return True
+    def _candidates() -> list[str]:
+        urls = []
+        path = request.url.path
+        query = f"?{request.url.query}" if request.url.query else ""
 
-    # Local tunneling/proxy setups often rewrite scheme/host on the app side.
-    # Validate against SERVER_BASE_URL + path as a fallback.
-    base = (SERVER_BASE_URL or "").rstrip("/")
-    if base:
-        forwarded_url = f"{base}{request.url.path}"
-        if request.url.query:
-            forwarded_url = f"{forwarded_url}?{request.url.query}"
-        if _validator.validate(forwarded_url, params, signature):
+        # Raw URL as seen by the app (works when not behind a proxy).
+        urls.append(str(request.url))
+
+        # Reconstruct from forwarded headers (Railway / any reverse proxy).
+        proto = request.headers.get("X-Forwarded-Proto", "")
+        host = request.headers.get("X-Forwarded-Host") or request.headers.get("Host", "")
+        if proto and host:
+            urls.append(f"{proto}://{host}{path}{query}")
+
+        # Explicit SERVER_BASE_URL override (local tunnels, etc.).
+        base = (SERVER_BASE_URL or "").rstrip("/")
+        if base:
+            urls.append(f"{base}{path}{query}")
+
+        return urls
+
+    for url in _candidates():
+        if _validator.validate(url, params, signature):
             return True
 
     logger.warning("Twilio signature validation failed for all candidate URLs")

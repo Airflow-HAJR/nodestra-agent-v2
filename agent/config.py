@@ -27,8 +27,13 @@ ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZz
 # Deepgram (transcription)
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")
 
-# Public base URL of this server (needed for Twilio to fetch <Play> audio)
-SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "http://localhost:8000")
+# Public base URL of this server (needed for Twilio to fetch <Play> audio).
+# Falls back to Railway's auto-injected domain when SERVER_BASE_URL is not set explicitly.
+_railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RAILWAY_STATIC_URL")
+SERVER_BASE_URL = (
+    os.environ.get("SERVER_BASE_URL")
+    or (f"https://{_railway_domain}" if _railway_domain else "http://localhost:8000")
+)
 
 # Cartesia TTS
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")

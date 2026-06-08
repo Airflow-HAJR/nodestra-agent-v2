@@ -260,7 +260,7 @@ def _verify_twilio_signature(request: Request, params: dict[str, str]) -> bool:
 
 
 def _parse_form(raw_body: bytes) -> dict[str, str]:
-    return {k: v[0] for k, v in parse_qs(raw_body.decode()).items()}
+    return {k: v[0] for k, v in parse_qs(raw_body.decode(), keep_blank_values=True).items()}
 
 
 def _build_gather_twiml(prompt: str) -> VoiceResponse:

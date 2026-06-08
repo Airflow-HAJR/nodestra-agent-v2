@@ -9,6 +9,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from agent.config import MEMORY_ENABLED
 from agent.llm import build_llm
 from agent.memory import get_last_flight, get_last_location, save_conversation, search_memories
 from agent.moss_search import search_moss_pois as moss_semantic_search_pois
@@ -186,6 +187,8 @@ def _commerce_prefetch_node(state: State) -> dict:
     to build a richer Moss query so results are already filtered by what the user likes.
     Results land in state.commerce_context so the system prompt injects them directly —
     the LLM never has a chance to skip either call."""
+    if not MEMORY_ENABLED:
+        return {"commerce_context": None}
     if not _has_commerce_intent(state):
         return {"commerce_context": None}
 
@@ -310,19 +313,23 @@ def _closure_node(state: State) -> dict:
 
 def _init_node(state: State) -> dict:
     """At conversation start, restore the user's last known location and flight from Supermemory."""
+    if not MEMORY_ENABLED:
+        return {}
     user_id = state.get("user_id")
     if not user_id:
         return {}
     result: dict = {}
     if not state.get("current_location"):
+        t0 = time.time()
         poi_id = get_last_location(user_id)
+        add_supermemory(time.time() - t0)
         if poi_id:
-            print("[thinking with supermemory]")
             result["current_location"] = poi_id
     if not state.get("flight_number"):
+        t0 = time.time()
         flight = get_last_flight(user_id)
+        add_supermemory(time.time() - t0)
         if flight:
-            print("[thinking with supermemory]")
             result["flight_number"] = flight
     return result
 

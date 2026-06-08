@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import parse_qs
 
+import requests as _requests
+
 from deepgram import AsyncDeepgramClient
 from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
 from elevenlabs import ElevenLabs
@@ -23,10 +25,14 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.config import (
+    CARTESIA_API_KEY,
+    CARTESIA_VOICE_ID,
+    CARTESIA_MODEL_ID,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
     SERVER_BASE_URL,
+    TTS_PROVIDER,
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
@@ -37,7 +43,7 @@ from agent import timing
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Lincoln Airport Agent")
+app = FastAPI(title="Oakland Airport Agent")
 _executor = ThreadPoolExecutor(max_workers=10)
 
 # ── Clients ───────────────────────────────────────────────────────────────────
@@ -82,7 +88,7 @@ async def serve_audio(token: str):
     return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
-def _tts_mp3_url(text: str) -> str | None:
+def _elevenlabs_tts_mp3_url(text: str) -> str | None:
     """Generate ElevenLabs MP3, cache it, return a /audio/{token} URL for TwiML <Play>."""
     if not _eleven or not ELEVENLABS_VOICE_ID:
         return None
@@ -91,7 +97,7 @@ def _tts_mp3_url(text: str) -> str | None:
             _eleven.text_to_speech.convert(
                 voice_id=ELEVENLABS_VOICE_ID,
                 text=text,
-                model_id="eleven_turbo_v2_5",
+                model_id="eleven_flash_v2_5",
                 output_format="mp3_44100_128",
             )
         )
@@ -101,25 +107,91 @@ def _tts_mp3_url(text: str) -> str | None:
         return None
 
 
-def _tts_mulaw_iter(text: str):
-    """
-    Yield ElevenLabs mulaw 8 kHz chunks as they are generated.
-    First chunk arrives in ~75ms (ElevenLabs turbo TTFB).
-    Caller streams each chunk straight to Twilio — no wait for full audio.
-    Falls back to None-yielding iterator if ElevenLabs is unavailable.
-    """
+def _elevenlabs_tts_mulaw_iter(text: str):
+    """Yield ElevenLabs mulaw 8 kHz chunks as they are generated."""
     if not _eleven or not ELEVENLABS_VOICE_ID:
         return iter([])
     try:
         return _eleven.text_to_speech.convert(
             voice_id=ELEVENLABS_VOICE_ID,
             text=text,
-            model_id="eleven_turbo_v2_5",
+            model_id="eleven_flash_v2_5",
             output_format="ulaw_8000",
         )
     except Exception as e:
         logger.error(f"ElevenLabs TTS (mulaw) failed: {e}")
         return iter([])
+
+
+# ── Cartesia TTS ──────────────────────────────────────────────────────────────
+
+_CARTESIA_URL = "https://api.cartesia.ai/tts/bytes"
+_CARTESIA_HEADERS = {
+    "Cartesia-Version": "2026-03-01",
+    "Content-Type": "application/json",
+}
+
+
+def _cartesia_tts_mp3_url(text: str) -> str | None:
+    """Generate Cartesia MP3, cache it, return a /audio/{token} URL for TwiML <Play>."""
+    if not CARTESIA_API_KEY:
+        return None
+    try:
+        resp = _requests.post(
+            _CARTESIA_URL,
+            headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
+            json={
+                "model_id": CARTESIA_MODEL_ID,
+                "transcript": text,
+                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+                "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+                "language": "en",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return f"{SERVER_BASE_URL}/audio/{_store_audio(resp.content)}"
+    except Exception as e:
+        logger.error(f"Cartesia TTS (mp3) failed: {e}")
+        return None
+
+
+def _cartesia_tts_mulaw_iter(text: str):
+    """Fetch Cartesia mulaw 8 kHz audio and yield it as a single chunk."""
+    if not CARTESIA_API_KEY:
+        return iter([])
+    try:
+        resp = _requests.post(
+            _CARTESIA_URL,
+            headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
+            json={
+                "model_id": CARTESIA_MODEL_ID,
+                "transcript": text,
+                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+                "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
+                "language": "en",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return iter([resp.content])
+    except Exception as e:
+        logger.error(f"Cartesia TTS (mulaw) failed: {e}")
+        return iter([])
+
+
+# ── TTS dispatch ──────────────────────────────────────────────────────────────
+
+def _tts_mp3_url(text: str) -> str | None:
+    if TTS_PROVIDER == "cartesia":
+        return _cartesia_tts_mp3_url(text)
+    return _elevenlabs_tts_mp3_url(text)
+
+
+def _tts_mulaw_iter(text: str):
+    if TTS_PROVIDER == "cartesia":
+        return _cartesia_tts_mulaw_iter(text)
+    return _elevenlabs_tts_mulaw_iter(text)
 
 
 # ── Request deduplication ─────────────────────────────────────────────────────
@@ -258,6 +330,7 @@ async def twilio_stream(ws: WebSocket):
                 continue
 
             timing.reset()
+            t_turn_start = time.time()
 
             try:
                 reply = await loop.run_in_executor(
@@ -270,13 +343,12 @@ async def twilio_stream(ws: WebSocket):
                 reply = {"text": "Something went wrong. Please try again or ask airport staff for help.", "hangup": False}
 
             # Stream ElevenLabs mulaw chunks to Twilio as they arrive.
-            # First chunk lands in ~75ms (turbo TTFB) — caller hears audio
-            # almost immediately rather than waiting for the full response.
             if stream_sid:
                 try:
                     chunk_iter = await loop.run_in_executor(
                         _executor, _tts_mulaw_iter, reply["text"]
                     )
+                    t_tts = time.time()
                     for chunk in chunk_iter:
                         if chunk:
                             await ws.send_json({
@@ -284,8 +356,11 @@ async def twilio_stream(ws: WebSocket):
                                 "streamSid": stream_sid,
                                 "media": {"payload": base64.b64encode(chunk).decode()},
                             })
+                    timing.add_tts(time.time() - t_tts)
                 except Exception as e:
                     logger.error(f"Audio stream failed [{call_sid}]: {e}")
+
+            logger.info(timing.summary(time.time() - t_turn_start))
 
             if reply.get("hangup") and _twilio and call_sid:
                 try:
@@ -300,32 +375,43 @@ async def twilio_stream(ws: WebSocket):
 
     # ── Deepgram v2 streaming connection ─────────────────────────────────────
 
-    dg_client = AsyncDeepgramClient(access_token=DEEPGRAM_API_KEY)
+    dg_client = AsyncDeepgramClient(api_key=DEEPGRAM_API_KEY)
 
     try:
         async with dg_client.listen.v2.connect(
-            model="nova-3",       # latest Deepgram model
+            model="flux-general-en",
             encoding="mulaw",
             sample_rate=8000,
         ) as dg_socket:
 
             # Receive Deepgram transcripts in a background task
             async def _dg_receiver():
-                async for msg in dg_socket:
-                    if not isinstance(msg, ListenV2TurnInfo):
-                        continue
-                    transcript = msg.transcript.strip()
-                    if not transcript:
-                        continue
-                    # EndOfTurn = user definitely finished speaking
-                    # EagerEndOfTurn = high-confidence early fire (lower latency)
-                    if msg.event in ("EndOfTurn", "EagerEndOfTurn"):
-                        logger.info(f"Deepgram [{msg.event}] [{call_sid}]: '{transcript}'")
-                        await transcript_q.put(transcript)
+                try:
+                    async for msg in dg_socket:
+                        # SDK may return a plain dict instead of ListenV2TurnInfo
+                        if isinstance(msg, dict):
+                            if msg.get("type") != "TurnInfo":
+                                continue
+                            event = msg.get("event", "")
+                            transcript = (msg.get("transcript") or "").strip()
+                        elif isinstance(msg, ListenV2TurnInfo):
+                            event = msg.event
+                            transcript = msg.transcript.strip()
+                        else:
+                            continue
+
+                        if event in ("EndOfTurn", "EagerEndOfTurn"):
+                            logger.info(f"Deepgram [{event}]: '{transcript}'")
+                            if transcript:
+                                await transcript_q.put(transcript)
+                except Exception as e:
+                    logger.error(f"_dg_receiver error: {e}", exc_info=True)
+                logger.info("_dg_receiver done")
 
             dg_task = asyncio.create_task(_dg_receiver())
 
             # Forward Twilio audio → Deepgram
+            media_count = 0
             try:
                 async for raw in ws.iter_text():
                     msg = json.loads(raw)
@@ -338,10 +424,13 @@ async def twilio_stream(ws: WebSocket):
                         logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number}")
 
                     elif event == "media":
+                        media_count += 1
+                        if media_count % 50 == 1:
+                            logger.info(f"Media chunks forwarded to Deepgram: {media_count}")
                         await dg_socket.send_media(base64.b64decode(msg["media"]["payload"]))
 
                     elif event == "stop":
-                        logger.info(f"Stream stopped: {stream_sid}")
+                        logger.info(f"Stream stopped: {stream_sid} (total media chunks: {media_count})")
                         break
 
             except WebSocketDisconnect:
@@ -379,11 +468,11 @@ async def twilio_voice_incoming(request: Request):
 
     # Fallback mode: use Twilio's built-in speech recognition if Deepgram is not configured.
     if not DEEPGRAM_API_KEY:
-        welcome = "Welcome to Lincoln Airport. How can I help you today?"
+        welcome = "Welcome to Oakland International Airport. How can I help you today?"
         vr = _build_gather_twiml(welcome)
         return Response(content=str(vr), media_type="application/xml")
 
-    welcome = "Welcome to Lincoln Airport. How can I help you today?"
+    welcome = "Welcome to Oakland International Airport. How can I help you today?"
     audio_url = await asyncio.get_running_loop().run_in_executor(_executor, _tts_mp3_url, welcome)
 
     vr = VoiceResponse()
@@ -486,7 +575,7 @@ class GateChangeRequest(BaseModel):
 async def gate_change(body: GateChangeRequest):
     """Notify a passenger of a gate change via outbound call or SMS fallback."""
     message = (
-        f"Hi, this is Lincoln Airport. Your flight {body.flight} "
+        f"Hi, this is Oakland International Airport. Your flight {body.flight} "
         f"gate has changed from {body.old_gate} to {body.new_gate}. "
         f"Please proceed to gate {body.new_gate}. Thank you."
     )
@@ -527,7 +616,7 @@ async def gate_change(body: GateChangeRequest):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "Lincoln Airport Agent"}
+    return {"status": "ok", "service": "Oakland Airport Agent"}
 
 
 if __name__ == "__main__":

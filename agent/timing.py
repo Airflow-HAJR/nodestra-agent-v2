@@ -5,6 +5,7 @@ _stats: dict = {
     "tool_ms": 0.0, "tool_calls": 0,
     "supermemory_ms": 0.0, "supermemory_calls": 0,
     "moss_ms": 0.0, "moss_calls": 0,
+    "tts_ms": 0.0, "tts_calls": 0,
 }
 
 
@@ -14,6 +15,7 @@ def reset():
         "tool_ms": 0.0, "tool_calls": 0,
         "supermemory_ms": 0.0, "supermemory_calls": 0,
         "moss_ms": 0.0, "moss_calls": 0,
+        "tts_ms": 0.0, "tts_calls": 0,
     })
     import agent.graph as _graph
     _graph.reset_turn_state()
@@ -39,24 +41,29 @@ def add_moss(seconds: float):
     _stats["moss_calls"] += 1
 
 
-def _avg(ms: float, calls: int) -> str:
-    return f"{ms / calls:.0f}ms avg" if calls else "—"
+def add_tts(seconds: float):
+    _stats["tts_ms"] += seconds * 1000
+    _stats["tts_calls"] += 1
+
+
+def _fmt(ms: float, calls: int) -> str:
+    return f"{ms:.0f}ms×{calls}" if calls else "—"
 
 
 def summary(total_seconds: float) -> str:
     total_ms = total_seconds * 1000
-    llm_ms = _stats["llm_ms"]
-    tool_ms = _stats["tool_ms"]
-    sm_ms = _stats["supermemory_ms"]
-    sm_calls = _stats["supermemory_calls"]
-    moss_ms = _stats["moss_ms"]
-    moss_calls = _stats["moss_calls"]
-    other_ms = total_ms - llm_ms - tool_ms
+    llm_ms   = _stats["llm_ms"]
+    tool_ms  = _stats["tool_ms"]
+    sm_ms    = _stats["supermemory_ms"]
+    moss_ms  = _stats["moss_ms"]
+    tts_ms   = _stats["tts_ms"]
+    other_ms = total_ms - llm_ms - tool_ms - sm_ms - moss_ms - tts_ms
     return (
-        f"  ⏱  total {total_ms:.0f}ms  |  "
-        f"llm {llm_ms:.0f}ms × {_stats['llm_calls']}  |  "
-        f"tools {tool_ms:.0f}ms × {_stats['tool_calls']}  |  "
-        f"supermemory {_avg(sm_ms, sm_calls)} × {sm_calls}  |  "
-        f"moss {_avg(moss_ms, moss_calls)} × {moss_calls}  |  "
-        f"other {other_ms:.0f}ms"
+        f"LATENCY  total={total_ms:.0f}ms"
+        f"  llm={_fmt(llm_ms, _stats['llm_calls'])}"
+        f"  tools={_fmt(tool_ms, _stats['tool_calls'])}"
+        f"  supermemory={_fmt(sm_ms, _stats['supermemory_calls'])}"
+        f"  moss={_fmt(moss_ms, _stats['moss_calls'])}"
+        f"  tts={_fmt(tts_ms, _stats['tts_calls'])}"
+        f"  other={other_ms:.0f}ms"
     )

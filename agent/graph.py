@@ -61,6 +61,10 @@ _speak_early_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar
     "speak_early_callback",
     default=None,
 )
+_sentence_callback_var: ContextVar[Callable[[str | None], None] | None] = ContextVar(
+    "sentence_callback",
+    default=None,
+)
 _tools_running_var: ContextVar[bool] = ContextVar("tools_running", default=False)
 _early_speak_idx_var: ContextVar[int] = ContextVar("early_speak_idx", default=0)
 
@@ -95,6 +99,15 @@ def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterato
         _speak_early_callback_var.reset(token)
 
 
+@contextmanager
+def bind_sentence_callback(callback: Callable[[str | None], None] | None) -> Iterator[None]:
+    token = _sentence_callback_var.set(callback)
+    try:
+        yield
+    finally:
+        _sentence_callback_var.reset(token)
+
+
 def reset_turn_state() -> None:
     global _turn_tools_used
     _spoken_early_var.set(False)
@@ -114,12 +127,50 @@ def _agent_node(state: State):
     print("[thinking]")
     t0 = time.time()
 
-    # Reset active_intents each turn so stale intents from prior turns don't pollute routing.
-    # Commerce prefetch and set_nav_state will repopulate them for this turn.
-    response = _llm_with_tools.invoke([
-        SystemMessage(content=system),
-        *state["messages"],
-    ])
+    sentence_cb = _sentence_callback_var.get()
+
+    if sentence_cb is not None:
+        # Stream tokens; fire sentence TTS callbacks for final (non-tool-call) responses.
+        from functools import reduce
+        chunks = []
+        buffer = ""
+        has_tool_calls = False
+        for chunk in _llm_with_tools.stream([SystemMessage(content=system), *state["messages"]]):
+            chunks.append(chunk)
+            if chunk.tool_calls:
+                has_tool_calls = True
+            if not has_tool_calls and isinstance(chunk.content, str) and chunk.content:
+                buffer += chunk.content
+                # Flush complete sentences as they arrive.
+                while True:
+                    found = False
+                    for sep in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+                        idx = buffer.find(sep)
+                        if idx >= 0:
+                            sentence = buffer[:idx + len(sep)].strip()
+                            buffer = buffer[idx + len(sep):]
+                            if sentence:
+                                sentence_cb(sentence)
+                            found = True
+                            break
+                    if not found:
+                        break
+        # Flush any remaining text.
+        if buffer.strip() and not has_tool_calls:
+            sentence_cb(buffer.strip())
+        # Signal end of streaming (only for text responses — tool-call turns don't stream TTS).
+        if not has_tool_calls:
+            sentence_cb(None)
+        response = reduce(lambda a, b: a + b, chunks) if chunks else _llm_with_tools.invoke(
+            [SystemMessage(content=system), *state["messages"]]
+        )
+    else:
+        # Reset active_intents each turn so stale intents from prior turns don't pollute routing.
+        # Commerce prefetch and set_nav_state will repopulate them for this turn.
+        response = _llm_with_tools.invoke([
+            SystemMessage(content=system),
+            *state["messages"],
+        ])
 
     dt = time.time() - t0
     add_llm(dt)

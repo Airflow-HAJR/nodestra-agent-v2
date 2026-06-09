@@ -5,7 +5,7 @@ import uuid
 from typing import Any
 
 from agent.config import DEFAULT_AIRPORT
-from agent.db import mark_supabase_unreachable, supabase_ok, get_service_client as get_supabase
+from agent.db import is_network_error, mark_supabase_unreachable, supabase_ok, get_service_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +69,9 @@ def upsert_user_memory(
             row["last_location_name"] = last_location_name
 
         sb.table("user_memory").upsert(row).execute()
-    except Exception:
-        mark_supabase_unreachable()
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
         logger.exception("upsert_user_memory failed — analytics skipped")
 
 
@@ -111,8 +112,9 @@ def start_call(
             "turn_count": 0,
             "resolved": False,
         }).execute()
-    except Exception:
-        mark_supabase_unreachable()
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
         logger.exception("start_call failed — analytics skipped")
 
 
@@ -139,8 +141,9 @@ def insert_turn(
             "other_ms": turn_stats.get("other_ms"),
             "tools_used": tools_used,
         }).execute()
-    except Exception:
-        mark_supabase_unreachable()
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
         logger.exception("insert_turn failed — analytics skipped")
 
 
@@ -173,8 +176,9 @@ def finish_call(
             "resolved": resolved,
             "summary": summary,
         }).eq("call_id", sid_to_uuid(call_id)).execute()
-    except Exception:
-        mark_supabase_unreachable()
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
         logger.exception("finish_call failed — analytics skipped")
 
 
@@ -214,6 +218,7 @@ def insert_call(
             "resolved": resolved,
             "summary": summary,
         }).execute()
-    except Exception:
-        mark_supabase_unreachable()
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
         logger.exception("insert_call failed — analytics skipped")

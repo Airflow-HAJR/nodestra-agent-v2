@@ -36,7 +36,7 @@ _railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN") or os.environ.get("RAI
 SERVER_BASE_URL = (
     os.environ.get("SERVER_BASE_URL")
     or (f"https://{_railway_domain}" if _railway_domain else "http://localhost:8000")
-)
+).rstrip("/")
 
 # Supermemory (persistent user personalization)
 SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")

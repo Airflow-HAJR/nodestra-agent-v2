@@ -23,6 +23,9 @@ TWILIO_PHONE_NUMBER = os.environ.get("TWILIO_PHONE_NUMBER")
 # ElevenLabs
 ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID", "JBFqnCBsd6RMkjVDRZzb")  # default: George
+# lower stability = more expressive/variable; higher style = more stylistic (0–1)
+ELEVENLABS_STABILITY = float(os.environ.get("ELEVENLABS_STABILITY", "0.3"))
+ELEVENLABS_STYLE = float(os.environ.get("ELEVENLABS_STYLE", "0.5"))
 
 # Deepgram (transcription)
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY")

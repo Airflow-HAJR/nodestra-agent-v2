@@ -14,7 +14,7 @@ import requests as _requests
 
 from deepgram import AsyncDeepgramClient
 from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
-from elevenlabs import ElevenLabs
+from elevenlabs import ElevenLabs, VoiceSettings
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
@@ -34,6 +34,8 @@ from agent.config import (
     DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
+    ELEVENLABS_STABILITY,
+    ELEVENLABS_STYLE,
     ELEVENLABS_VOICE_ID,
     SERVER_BASE_URL,
     TTS_PROVIDER,
@@ -106,6 +108,12 @@ def _elevenlabs_tts_mp3_url(text: str) -> str | None:
                 text=text,
                 model_id="eleven_flash_v2_5",
                 output_format="mp3_44100_128",
+                voice_settings=VoiceSettings(
+                    stability=ELEVENLABS_STABILITY,
+                    similarity_boost=0.85,
+                    style=ELEVENLABS_STYLE,
+                    use_speaker_boost=True,
+                ),
             )
         )
         return f"{SERVER_BASE_URL}/audio/{_store_audio(audio_bytes)}"
@@ -124,6 +132,12 @@ def _elevenlabs_tts_mulaw_iter(text: str):
             text=text,
             model_id="eleven_flash_v2_5",
             output_format="ulaw_8000",
+            voice_settings=VoiceSettings(
+                stability=ELEVENLABS_STABILITY,
+                similarity_boost=0.85,
+                style=ELEVENLABS_STYLE,
+                use_speaker_boost=True,
+            ),
         )
     except Exception as e:
         logger.error(f"ElevenLabs TTS (mulaw) failed: {e}")

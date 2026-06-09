@@ -15,7 +15,7 @@ import os
 from agent.config import SUPABASE_KEY, SUPABASE_URL
 
 SUPABASE_CONFIGURED: bool = bool(SUPABASE_URL and SUPABASE_KEY)
-_supabase_reachable: bool = True  # set False on first ConnectError; never reset
+_supabase_reachable: bool = True  # set False on first network-level failure; never reset
 
 
 def supabase_ok() -> bool:
@@ -23,8 +23,16 @@ def supabase_ok() -> bool:
 
 
 def mark_supabase_unreachable() -> None:
+    """Trip the circuit breaker. Only call this for network errors (DNS / timeout),
+    not for API/schema errors — those are fixable without a redeploy."""
     global _supabase_reachable
     _supabase_reachable = False
+
+
+def is_network_error(exc: BaseException) -> bool:
+    """Return True for transport-level errors that mean Supabase is unreachable."""
+    type_name = type(exc).__name__
+    return type_name in {"ConnectError", "ConnectTimeout", "ReadTimeout", "TimeoutException"}
 
 
 _client: Optional[Client] = None

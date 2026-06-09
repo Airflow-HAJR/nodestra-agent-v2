@@ -13,3 +13,4 @@ class State(TypedDict):
     last_error: Optional[str]
     should_end: Optional[bool]
     user_id: Optional[str]
+    user_profile: Optional[dict]  # profile_facts loaded from user_memory at session start

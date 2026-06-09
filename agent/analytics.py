@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 from agent.config import DEFAULT_AIRPORT
-from agent.db import get_service_client as get_supabase
+from agent.db import SUPABASE_CONFIGURED, get_service_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,8 @@ def upsert_user_memory(
     last_location_name: str | None = None,
     profile_facts_patch: dict[str, str] | None = None,
 ) -> None:
+    if not SUPABASE_CONFIGURED:
+        return
     try:
         sb = get_supabase()
 
@@ -70,6 +72,8 @@ def start_call(
     started_at: float,
 ) -> None:
     """Insert minimal calls row at session start so turns can FK-reference it."""
+    if not SUPABASE_CONFIGURED:
+        return
     try:
         sb = get_supabase()
         # user_memory must exist before calls (FK). Upsert a minimal row if needed.
@@ -108,6 +112,8 @@ def insert_turn(
     turn_stats: dict,
     tools_used: list[str],
 ) -> None:
+    if not SUPABASE_CONFIGURED:
+        return
     try:
         sb = get_supabase()
         sb.table("turns").insert({
@@ -138,6 +144,8 @@ def finish_call(
     summary: str | None,
 ) -> None:
     """Update the calls row created by start_call() with final stats."""
+    if not SUPABASE_CONFIGURED:
+        return
     try:
         sb = get_supabase()
         sb.table("calls").update({
@@ -172,6 +180,8 @@ def insert_call(
     resolved: bool,
     summary: str | None,
 ) -> None:
+    if not SUPABASE_CONFIGURED:
+        return
     try:
         sb = get_supabase()
         sb.table("calls").upsert({

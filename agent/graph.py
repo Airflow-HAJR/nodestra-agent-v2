@@ -375,8 +375,19 @@ def _timed_tools(state: State):
         _tools_running_var.set(False)
     add_tool(time.time() - t0)
 
-    # Log tool results
-    for msg in result.get("messages", []):
+    # Log tool results.
+    # ToolNode returns a dict normally; a list when any tool returns Command.
+    log_messages: list = []
+    if isinstance(result, dict):
+        log_messages = result.get("messages", [])
+    elif isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict):
+                log_messages.extend(item.get("messages", []))
+            elif hasattr(item, "update") and isinstance(getattr(item, "update", None), dict):
+                log_messages.extend(item.update.get("messages", []))
+
+    for msg in log_messages:
         if isinstance(msg, ToolMessage):
             status = (
                 "error"

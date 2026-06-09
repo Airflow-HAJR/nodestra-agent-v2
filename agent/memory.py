@@ -2,7 +2,7 @@ import logging
 
 from agent.analytics import _safe_data, hash_user_id, upsert_user_memory
 from agent.config import DEFAULT_AIRPORT
-from agent.db import SUPABASE_CONFIGURED, get_client as get_supabase
+from agent.db import mark_supabase_unreachable, supabase_ok, get_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ def search_memories(user_id: str, query: str) -> str:
 
 
 def get_last_location(user_id: str) -> str | None:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return None
     try:
         result = (
@@ -25,6 +25,7 @@ def get_last_location(user_id: str) -> str | None:
         )
         return _safe_data(result).get("last_location")
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("get_last_location failed")
         return None
 
@@ -39,7 +40,7 @@ def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
 
 
 def get_last_flight(user_id: str) -> str | None:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return None
     try:
         result = (
@@ -52,6 +53,7 @@ def get_last_flight(user_id: str) -> str | None:
         )
         return _safe_data(result).get("last_flight")
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("get_last_flight failed")
         return None
 
@@ -65,7 +67,7 @@ def update_flight(user_id: str, flight_number: str) -> None:
 
 
 def get_user_profile(user_id: str) -> dict:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return {}
     try:
         result = (
@@ -78,6 +80,7 @@ def get_user_profile(user_id: str) -> dict:
         )
         return _safe_data(result)
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("get_user_profile failed")
         return {}
 

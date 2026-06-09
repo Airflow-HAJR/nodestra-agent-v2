@@ -15,6 +15,17 @@ import os
 from agent.config import SUPABASE_KEY, SUPABASE_URL
 
 SUPABASE_CONFIGURED: bool = bool(SUPABASE_URL and SUPABASE_KEY)
+_supabase_reachable: bool = True  # set False on first ConnectError; never reset
+
+
+def supabase_ok() -> bool:
+    return SUPABASE_CONFIGURED and _supabase_reachable
+
+
+def mark_supabase_unreachable() -> None:
+    global _supabase_reachable
+    _supabase_reachable = False
+
 
 _client: Optional[Client] = None
 _service_client: Optional[Client] = None

@@ -4,7 +4,7 @@ import time
 from typing import Any
 
 from agent.config import DEFAULT_AIRPORT
-from agent.db import SUPABASE_CONFIGURED, get_service_client as get_supabase
+from agent.db import mark_supabase_unreachable, supabase_ok, get_service_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def upsert_user_memory(
     last_location_name: str | None = None,
     profile_facts_patch: dict[str, str] | None = None,
 ) -> None:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return
     try:
         sb = get_supabase()
@@ -61,6 +61,7 @@ def upsert_user_memory(
 
         sb.table("user_memory").upsert(row).execute()
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("upsert_user_memory failed — analytics skipped")
 
 
@@ -72,7 +73,7 @@ def start_call(
     started_at: float,
 ) -> None:
     """Insert minimal calls row at session start so turns can FK-reference it."""
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return
     try:
         sb = get_supabase()
@@ -102,6 +103,7 @@ def start_call(
             "resolved": False,
         }).execute()
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("start_call failed — analytics skipped")
 
 
@@ -112,7 +114,7 @@ def insert_turn(
     turn_stats: dict,
     tools_used: list[str],
 ) -> None:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return
     try:
         sb = get_supabase()
@@ -129,6 +131,7 @@ def insert_turn(
             "tools_used": tools_used,
         }).execute()
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("insert_turn failed — analytics skipped")
 
 
@@ -144,7 +147,7 @@ def finish_call(
     summary: str | None,
 ) -> None:
     """Update the calls row created by start_call() with final stats."""
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return
     try:
         sb = get_supabase()
@@ -162,6 +165,7 @@ def finish_call(
             "summary": summary,
         }).eq("call_id", call_id).execute()
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("finish_call failed — analytics skipped")
 
 
@@ -180,7 +184,7 @@ def insert_call(
     resolved: bool,
     summary: str | None,
 ) -> None:
-    if not SUPABASE_CONFIGURED:
+    if not supabase_ok():
         return
     try:
         sb = get_supabase()
@@ -202,4 +206,5 @@ def insert_call(
             "summary": summary,
         }).execute()
     except Exception:
+        mark_supabase_unreachable()
         logger.exception("insert_call failed — analytics skipped")

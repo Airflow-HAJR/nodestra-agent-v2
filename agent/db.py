@@ -14,6 +14,8 @@ import os
 
 from agent.config import SUPABASE_KEY, SUPABASE_URL
 
+SUPABASE_CONFIGURED: bool = bool(SUPABASE_URL and SUPABASE_KEY)
+
 _client: Optional[Client] = None
 _service_client: Optional[Client] = None
 _MAP_CACHE: dict[str, tuple[list[dict], float]] = {}

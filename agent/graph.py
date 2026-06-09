@@ -414,21 +414,19 @@ def _build_subgraph():
 def _init_node(state: State) -> dict:
     """At conversation start, restore the user's last known location and flight from memory."""
     user_id = state.get("user_id")
-    if not user_id:
+    if not user_id or not MEMORY_ENABLED:
         return {}
     result: dict = {}
     if not state.get("current_location"):
         t0 = time.time()
         poi_id = get_last_location(user_id)
-        if MEMORY_ENABLED:
-            add_supermemory(time.time() - t0)
+        add_supermemory(time.time() - t0)
         if poi_id:
             result["current_location"] = poi_id
     if not state.get("flight_number"):
         t0 = time.time()
         flight = get_last_flight(user_id)
-        if MEMORY_ENABLED:
-            add_supermemory(time.time() - t0)
+        add_supermemory(time.time() - t0)
         if flight:
             result["flight_number"] = flight
     return result

@@ -10,21 +10,36 @@ from typing import Optional
 
 from supabase import Client, create_client
 
+import os
+
 from agent.config import SUPABASE_KEY, SUPABASE_URL
 
 _client: Optional[Client] = None
+_service_client: Optional[Client] = None
 _MAP_CACHE: dict[str, tuple[list[dict], float]] = {}
 _MAP_LOCK = threading.Lock()
 _MAP_TTL_SECONDS = 3600
 
 
 def get_client() -> Client:
+    """Anon-key client — used for map reads."""
     global _client
     if _client is None:
         if not SUPABASE_URL or not SUPABASE_KEY:
             raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
         _client = create_client(SUPABASE_URL, SUPABASE_KEY)
     return _client
+
+
+def get_service_client() -> Client:
+    """Service-role client — bypasses RLS, used for analytics writes."""
+    global _service_client
+    if _service_client is None:
+        service_key = os.environ.get("SUPABASE_SERVICE_KEY") or SUPABASE_KEY
+        if not SUPABASE_URL or not service_key:
+            raise RuntimeError("SUPABASE_URL must be set in .env")
+        _service_client = create_client(SUPABASE_URL, service_key)
+    return _service_client
 
 
 def _slim_levels(rows: list[dict]) -> list[dict]:

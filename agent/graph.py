@@ -9,10 +9,19 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.llm import build_llm
-from agent.memory import get_last_flight, get_last_location
+from agent.memory import get_last_flight, get_last_location, get_user_profile
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.timing import add_llm, add_tool
+import logging
+
+logger = logging.getLogger(__name__)
+
+_turn_tools_used: list[str] = []
+
+
+def get_turn_tools_used() -> list[str]:
+    return list(_turn_tools_used)
 from agent.tools import TOOLS
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
@@ -76,7 +85,9 @@ def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterato
 
 
 def reset_turn_state() -> None:
+    global _turn_tools_used
     _spoken_early_var.set(False)
+    _turn_tools_used = []
 
 
 ITERATION_CAP = 30
@@ -166,7 +177,7 @@ def _pick_early_phrase(state: State) -> str | None:
 
 
 def _timed_tools(state: State):
-    global tools_running
+    global tools_running, _turn_tools_used
 
     if not _spoken_early_var.get():
         early_msg_text = _pick_early_phrase(state)
@@ -174,13 +185,39 @@ def _timed_tools(state: State):
         if early_msg_text:
             speak_early(early_msg_text)
 
+    # Collect tool calls from last AI message
+    batch: list[dict] = []
+    for msg in reversed(state["messages"]):
+        calls = getattr(msg, "tool_calls", None)
+        if calls:
+            batch = [
+                {"name": tc["name"] if isinstance(tc, dict) else tc.name,
+                 "args": tc["args"] if isinstance(tc, dict) else tc.args}
+                for tc in calls
+            ]
+            break
+
+    for tc in batch:
+        args_str = ", ".join(f"{k}={repr(v)}" for k, v in tc["args"].items()) if tc["args"] else ""
+        print(f"  → {tc['name']}({args_str})")
+        _turn_tools_used.append(tc["name"])
+
     tools_running = True
     t0 = time.time()
     try:
         result = _tool_node.invoke(state)
     finally:
         tools_running = False
-    add_tool(time.time() - t0)
+    elapsed = time.time() - t0
+    add_tool(elapsed, len(batch) or 1)
+
+    # Print tool results
+    for msg in (result.get("messages") or []):
+        if isinstance(msg, ToolMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            truncated = content[:200] + "..." if len(content) > 200 else content
+            print(f"  ← {truncated}")
+
     return result
 
 
@@ -229,6 +266,10 @@ def _init_node(state: State) -> dict:
         flight = get_last_flight(user_id)
         if flight:
             result["flight_number"] = flight
+    if not state.get("user_profile"):
+        profile = get_user_profile(user_id)
+        if profile:
+            result["user_profile"] = profile
     return result
 
 

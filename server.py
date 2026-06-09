@@ -24,10 +24,13 @@ from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
+from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
+from agent.graph import get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
     CARTESIA_VOICE_ID,
     CARTESIA_MODEL_ID,
+    DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
@@ -38,6 +41,7 @@ from agent.config import (
     TWILIO_PHONE_NUMBER,
 )
 from agent.graph import ITERATION_CAP, graph
+from agent.summarizer import summarize
 from agent import timing
 
 logging.basicConfig(level=logging.INFO)
@@ -200,6 +204,9 @@ _dedup_lock = threading.Lock()
 _recent_requests: dict[str, float] = {}
 _DEDUP_TTL = 30.0
 
+# SMS session tracking: from_number → {started_at, turn_count}
+_sms_sessions: dict[str, dict] = {}
+
 
 def _check_and_register(call_id: str, user_text: str) -> bool:
     key = f"{call_id}:{hashlib.md5(user_text.encode()).hexdigest()}"
@@ -331,6 +338,7 @@ async def twilio_stream(ws: WebSocket):
     stream_sid: str | None = None
     call_sid: str | None = None
     from_number: str | None = None
+    call_started_at: float = time.time()
 
     # Transcripts from Deepgram → agent worker
     transcript_q: asyncio.Queue[str | None] = asyncio.Queue()
@@ -349,6 +357,7 @@ async def twilio_stream(ws: WebSocket):
 
             timing.reset()
             t_turn_start = time.time()
+            turn_number = timing._call["turn_count"] + 1
 
             try:
                 reply = await loop.run_in_executor(
@@ -378,7 +387,17 @@ async def twilio_stream(ws: WebSocket):
                 except Exception as e:
                     logger.error(f"Audio stream failed [{call_sid}]: {e}")
 
-            logger.info(timing.summary(time.time() - t_turn_start))
+            turn_total = time.time() - t_turn_start
+            logger.info(timing.summary(turn_total))
+            try:
+                await loop.run_in_executor(_executor, lambda: insert_turn(
+                    call_id=call_sid or str(uuid.uuid4()),
+                    turn_number=turn_number,
+                    turn_stats=timing.turn_snapshot(turn_total),
+                    tools_used=get_turn_tools_used(),
+                ))
+            except Exception:
+                logger.exception("insert_turn failed in agent_worker")
 
             if reply.get("hangup") and _twilio and call_sid:
                 try:
@@ -439,6 +458,14 @@ async def twilio_stream(ws: WebSocket):
                         stream_sid = msg["streamSid"]
                         call_sid = msg["start"]["callSid"]
                         from_number = msg["start"].get("customParameters", {}).get("from_number")
+                        call_started_at = time.time()
+                        timing.call_reset()
+                        _uid_hash = hash_user_id(from_number) if from_number else None
+                        await loop.run_in_executor(_executor, lambda: start_call(
+                            call_id=call_sid,
+                            user_id_hash=_uid_hash,
+                            started_at=call_started_at,
+                        ))
                         logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number}")
 
                     elif event == "media":
@@ -465,6 +492,45 @@ async def twilio_stream(ws: WebSocket):
         await transcript_q.put(None)  # stop agent worker
         await worker
         logger.info(f"Stream cleaned up: {stream_sid}")
+
+        # Write analytics — non-blocking, never raises
+        try:
+            duration = time.time() - call_started_at
+            cfg = {"configurable": {"thread_id": call_sid}} if call_sid else None
+            state_snap: dict = {}
+            if cfg:
+                snap = graph.get_state(cfg)
+                state_snap = snap.values if snap else {}
+            messages = state_snap.get("messages", [])
+            call_stats = timing.call_snapshot()
+            summary_data = await loop.run_in_executor(
+                _executor, summarize, messages, state_snap
+            )
+            uid_hash = hash_user_id(from_number) if from_number else None
+            await loop.run_in_executor(
+                _executor, lambda: finish_call(
+                    call_id=call_sid or str(uuid.uuid4()),
+                    duration_s=duration,
+                    turn_count=call_stats["turn_count"],
+                    timing=call_stats,
+                    flight_number=state_snap.get("flight_number"),
+                    topics=summary_data["topics"],
+                    resolved=summary_data["resolved"],
+                    summary=summary_data["summary"],
+                )
+            )
+            if uid_hash:
+                await loop.run_in_executor(
+                    _executor, lambda: upsert_user_memory(
+                        uid_hash,
+                        DEFAULT_AIRPORT,
+                        last_flight=state_snap.get("flight_number"),
+                        last_location=state_snap.get("current_location"),
+                        last_location_name=None,
+                    )
+                )
+        except Exception:
+            logger.exception(f"Analytics write failed for call {call_sid}")
 
 
 # ── Voice entry point ─────────────────────────────────────────────────────────
@@ -568,6 +634,54 @@ async def twilio_sms(request: Request):
         return Response(content=str(mr), media_type="application/xml")
 
     loop = asyncio.get_running_loop()
+
+    # Start a new SMS session if needed
+    if from_number not in _sms_sessions:
+        _sms_sessions[from_number] = {"started_at": time.time(), "turn_count": 0}
+        timing.call_reset()
+
+    # END (all caps) terminates the session and writes analytics
+    if body_text == "END":
+        session = _sms_sessions.pop(from_number, {})
+        started_at = session.get("started_at", time.time())
+        try:
+            cfg = {"configurable": {"thread_id": from_number}}
+            snap = graph.get_state(cfg)
+            state_snap: dict = snap.values if snap else {}
+            messages = state_snap.get("messages", [])
+            call_stats = timing.call_snapshot()
+            summary_data = await loop.run_in_executor(_executor, summarize, messages, state_snap)
+            uid_hash = hash_user_id(from_number) if from_number else None
+            await loop.run_in_executor(
+                _executor, lambda: insert_call(
+                    call_id=str(uuid.uuid4()),
+                    airport_id=DEFAULT_AIRPORT,
+                    user_id_hash=uid_hash,
+                    started_at=started_at,
+                    duration_s=time.time() - started_at,
+                    turn_count=call_stats["turn_count"],
+                    timing=call_stats,
+                    flight_number=state_snap.get("flight_number"),
+                    topics=summary_data["topics"],
+                    resolved=summary_data["resolved"],
+                    summary=summary_data["summary"],
+                )
+            )
+            if uid_hash:
+                await loop.run_in_executor(
+                    _executor, lambda: upsert_user_memory(
+                        uid_hash, DEFAULT_AIRPORT,
+                        last_flight=state_snap.get("flight_number"),
+                        last_location=state_snap.get("current_location"),
+                    )
+                )
+        except Exception:
+            logger.exception(f"SMS analytics write failed for {from_number}")
+        mr = MessagingResponse()
+        mr.message("Thanks, goodbye!")
+        return Response(content=str(mr), media_type="application/xml")
+
+    _sms_sessions[from_number]["turn_count"] += 1
     timing.reset()
     try:
         reply = await loop.run_in_executor(_executor, _graph_reply, body_text, from_number, from_number)

@@ -8,6 +8,7 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
+from agent.analytics import hash_user_id, upsert_user_memory
 from agent.config import DEFAULT_AIRPORT
 from agent.db import load_map_levels
 from agent.map_engine import (
@@ -314,6 +315,71 @@ def set_flight_number(
     })
 
 
+# ---------------------------------------------------------------------------
+# User memory tools
+# ---------------------------------------------------------------------------
+
+
+@tool
+def recall_user_memories(state: Annotated[dict, InjectedState] = {}) -> str:
+    """Retrieve everything stored about this user from previous conversations —
+    preferences, loyalty cards, flight history, home city, etc.
+    Call this whenever the user asks what you remember about them,
+    or when knowing their history would help you assist them better."""
+    print("[thinking]")
+    user_id = state.get("user_id") if state else None
+    if not user_id:
+        return "No user profile — this is a guest session with no stored memories."
+    try:
+        from agent.analytics import _safe_data, hash_user_id
+        from agent.db import get_service_client
+        result = _safe_data(
+            get_service_client()
+            .table("user_memory")
+            .select("profile_facts, last_flight, last_location_name, visit_count, last_seen")
+            .eq("user_id_hash", hash_user_id(user_id))
+            .maybe_single()
+            .execute()
+        )
+        if not result:
+            return "No memories stored for this user yet."
+        parts: list[str] = []
+        if result.get("visit_count"):
+            parts.append(f"visit_count: {result['visit_count']}")
+        if result.get("last_flight"):
+            parts.append(f"last_flight: {result['last_flight']}")
+        if result.get("last_location_name"):
+            parts.append(f"last_location: {result['last_location_name']}")
+        facts: dict = result.get("profile_facts") or {}
+        for k, v in facts.items():
+            parts.append(f"{k}: {v}")
+        return "\n".join(parts) if parts else "No memories stored for this user yet."
+    except Exception as e:
+        return f"Could not retrieve memories: {e}"
+
+class UpdateUserMemoryInput(BaseModel):
+    facts: dict[str, str] = Field(
+        description=(
+            "Key-value facts about this user to remember for future calls. "
+            "E.g. {'preferred_airline': 'Southwest', 'card': 'Amex Platinum', 'home_city': 'Seattle'}"
+        )
+    )
+
+
+@tool(args_schema=UpdateUserMemoryInput)
+def update_user_memory(
+    facts: dict[str, str],
+    state: Annotated[dict, InjectedState] = {},
+) -> str:
+    """Persist anything useful learned about this user for future calls.
+    Call whenever the user reveals a preference, loyalty card, home city, airline, accessibility need, etc."""
+    print("[thinking]")
+    user_id = state.get("user_id") if state else None
+    if user_id:
+        upsert_user_memory(hash_user_id(user_id), DEFAULT_AIRPORT, profile_facts_patch=facts)
+    return "Got it, I'll remember that."
+
+
 TOOLS = [
     find_poi,
     get_route,
@@ -322,4 +388,6 @@ TOOLS = [
     find_nearest,
     set_nav_state,
     set_flight_number,
+    update_user_memory,
+    recall_user_memories,
 ]

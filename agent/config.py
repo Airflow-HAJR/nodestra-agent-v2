@@ -48,7 +48,7 @@ CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID", "db6b0ed5-d5d3-463d-ae85
 CARTESIA_MODEL_ID = os.environ.get("CARTESIA_MODEL_ID", "sonic-3.5")
 
 # TTS provider: "elevenlabs" | "cartesia"
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "elevenlabs")
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 
 # Feature flags
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"

@@ -25,7 +25,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
-from agent.graph import get_turn_tools_used
+from agent.graph import bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
     CARTESIA_VOICE_ID,
@@ -364,10 +364,61 @@ async def twilio_stream(ws: WebSocket):
             turn_number = timing._call["turn_count"] + 1
             log_event("turn_start", thread_id=call_sid or "", transcript=transcript[:200])
 
+            # Single queue drains all audio: filler → sentence-streamed response (or fallback TTS).
+            audio_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+            # Set by sentence_cb(None) when streaming completes; checked after graph returns.
+            sentence_did_stream = threading.Event()
+
+            async def _drain_audio() -> None:
+                while True:
+                    chunk = await audio_q.get()
+                    if chunk is None:
+                        break
+                    if stream_sid:
+                        try:
+                            await ws.send_json({
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {"payload": base64.b64encode(chunk).decode()},
+                            })
+                        except Exception as e:
+                            logger.error(f"Audio send failed [{call_sid}]: {e}")
+
+            drain_task = asyncio.create_task(_drain_audio())
+
+            def early_speak_cb(text: str) -> None:
+                """Generate filler TTS synchronously in the graph thread and queue chunks."""
+                try:
+                    t = time.time()
+                    for chunk in _tts_mulaw_iter(text):
+                        if chunk:
+                            loop.call_soon_threadsafe(audio_q.put_nowait, chunk)
+                    timing.add_tts(time.time() - t)
+                except Exception as e:
+                    logger.error(f"Early speak TTS failed: {e}")
+
+            def sentence_cb(text_or_none: str | None) -> None:
+                """Generate per-sentence TTS in the graph thread; None signals end of response."""
+                if text_or_none is None:
+                    sentence_did_stream.set()
+                    loop.call_soon_threadsafe(audio_q.put_nowait, None)
+                    return
+                try:
+                    t = time.time()
+                    for chunk in _tts_mulaw_iter(text_or_none):
+                        if chunk:
+                            loop.call_soon_threadsafe(audio_q.put_nowait, chunk)
+                    timing.add_tts(time.time() - t)
+                except Exception as e:
+                    logger.error(f"Sentence TTS failed: {e}")
+
+            reply: dict = {"text": "", "hangup": False}
             try:
-                reply = await loop.run_in_executor(
-                    _executor, _graph_reply, transcript, call_sid or "", from_number
-                )
+                with bind_speak_early_callback(early_speak_cb):
+                    with bind_sentence_callback(sentence_cb):
+                        reply = await loop.run_in_executor(
+                            _executor, _graph_reply, transcript, call_sid or "", from_number
+                        )
             except GraphRecursionError as e:
                 log_event("graph_error", thread_id=call_sid or "", error_type="GraphRecursionError", message=str(e))
                 reply = {"text": "I'm getting a bit turned around. Could you re-state what you need?", "hangup": False}
@@ -376,23 +427,24 @@ async def twilio_stream(ws: WebSocket):
                 logger.error(f"Agent error [{call_sid}]: {e}", exc_info=True)
                 reply = {"text": "Something went wrong. Please try again or ask airport staff for help.", "hangup": False}
 
-            # Stream ElevenLabs mulaw chunks to Twilio as they arrive.
-            if stream_sid:
-                try:
-                    chunk_iter = await loop.run_in_executor(
-                        _executor, _tts_mulaw_iter, reply["text"]
-                    )
-                    t_tts = time.time()
-                    for chunk in chunk_iter:
-                        if chunk:
-                            await ws.send_json({
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": base64.b64encode(chunk).decode()},
-                            })
-                    timing.add_tts(time.time() - t_tts)
-                except Exception as e:
-                    logger.error(f"Audio stream failed [{call_sid}]: {e}")
+            # If sentence streaming didn't complete (error path, or graph emitted no text),
+            # fall back to full-text TTS so the drain task always receives a None terminator.
+            if not sentence_did_stream.is_set():
+                if stream_sid and reply.get("text"):
+                    try:
+                        t_tts = time.time()
+                        chunks = await loop.run_in_executor(
+                            _executor, lambda: list(_tts_mulaw_iter(reply["text"]))
+                        )
+                        for chunk in chunks:
+                            if chunk:
+                                audio_q.put_nowait(chunk)
+                        timing.add_tts(time.time() - t_tts)
+                    except Exception as e:
+                        logger.error(f"Fallback TTS failed [{call_sid}]: {e}")
+                audio_q.put_nowait(None)
+
+            await drain_task
 
             turn_total = time.time() - t_turn_start
             logger.info(timing.summary(turn_total))

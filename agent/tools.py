@@ -18,7 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.memory import get_last_location, update_flight, update_location
+from agent.memory import get_last_location, save_conversation, update_flight, update_location
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +53,6 @@ class FindNearestInput(BaseModel):
     source: str = Field(description="Source POI id to search from")
     poi_type: str = Field(description="Type of POI to find, e.g. 'restroom', 'gate', 'lounge'")
     airport_id: str = Field(default=DEFAULT_AIRPORT)
-
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +141,7 @@ def resolve_poi(
 @tool(args_schema=RouteInput)
 def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Get shortest path between two POIs. start and end must be POI ids returned by find_poi."""
-    # Refresh start from state/Supermemory so the route always begins from the user's
+    # Refresh start from state so the route always begins from the user's
     # actual current location, not a hallucinated or stale one from the LLM.
     print("[thinking]")
     user_id = state.get("user_id") if state else None
@@ -195,7 +194,7 @@ def get_nodes(airport_id: str = DEFAULT_AIRPORT, floor: Optional[str] = None):
 @tool(args_schema=FindNearestInput)
 def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Find the closest POI of a given type from a source location."""
-    # Refresh source from Supermemory dynamic profile so detours always use the latest location.
+    # Refresh source from stored location so detours always use the latest location.
     print("[thinking]")
     user_id = state.get("user_id") if state else None
     if user_id:
@@ -277,7 +276,11 @@ def set_nav_state(
         msg = "Error: " + " | ".join(errors)
         return Command(update={"messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)]})
 
-    nav_update: dict = {"messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)]}
+    existing_intents = list(state.get("active_intents") or [])
+    nav_update: dict = {
+        "messages": [ToolMessage(content="nav state updated", tool_call_id=tool_call_id)],
+        "active_intents": list({*existing_intents, "navigate"}),
+    }
     if final_destination is not None:
         nav_update["final_destination"] = final_destination
     if current_location is not None:
@@ -316,9 +319,33 @@ def set_flight_number(
 
 
 # ---------------------------------------------------------------------------
-# User memory tools
+# Call end tool
 # ---------------------------------------------------------------------------
 
+@tool
+def end_call(
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[dict, InjectedState],
+) -> Command:
+    """Signal that the conversation is complete and the call should end.
+
+    Call this when the user indicates they are done: farewell phrases
+    ("bye", "that's all", "I'm good", "no thanks", "goodbye", "thanks bye", "I'm set"),
+    or when you just confirmed the user arrived at their destination and they have no further requests.
+    After calling this tool, deliver a brief closing message (e.g. "Safe travels!") and stop asking questions.
+    """
+    user_id = state.get("user_id")
+    if user_id:
+        save_conversation(user_id, state.get("messages", []))
+    return Command(update={
+        "should_end": True,
+        "messages": [ToolMessage(content="call ended", tool_call_id=tool_call_id)],
+    })
+
+
+# ---------------------------------------------------------------------------
+# User memory tools
+# ---------------------------------------------------------------------------
 
 @tool
 def recall_user_memories(state: Annotated[dict, InjectedState] = {}) -> str:
@@ -357,6 +384,7 @@ def recall_user_memories(state: Annotated[dict, InjectedState] = {}) -> str:
     except Exception as e:
         return f"Could not retrieve memories: {e}"
 
+
 class UpdateUserMemoryInput(BaseModel):
     facts: dict[str, str] = Field(
         description=(
@@ -388,6 +416,7 @@ TOOLS = [
     find_nearest,
     set_nav_state,
     set_flight_number,
+    end_call,
     update_user_memory,
     recall_user_memories,
 ]

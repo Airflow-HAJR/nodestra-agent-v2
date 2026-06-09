@@ -1,4 +1,4 @@
-from typing import Annotated, Optional
+from typing import Annotated, List, Optional
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -13,4 +13,6 @@ class State(TypedDict):
     last_error: Optional[str]
     should_end: Optional[bool]
     user_id: Optional[str]
+    commerce_context: Optional[str]
+    active_intents: Optional[List[str]]
     user_profile: Optional[dict]  # profile_facts loaded from user_memory at session start

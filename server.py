@@ -40,9 +40,11 @@ from agent.config import (
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
 )
+from agent.db import invalidate_map_cache, load_map_levels
 from agent.graph import ITERATION_CAP, graph
 from agent.summarizer import summarize
 from agent import timing
+from agent.logger import log_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -307,8 +309,10 @@ def _graph_reply(user_text: str, thread_id: str, user_id: str | None = None) -> 
     response_text = _extract_response_text(result)
     if not response_text:
         return {"text": "I'm having trouble with that. Please try again.", "hangup": False}
+    hangup = bool(result.get("should_end", False))
+    log_event("turn_end", thread_id=thread_id, response=response_text[:200], hangup=hangup)
     logger.info(f"{thread_id} response: {response_text[:100]}")
-    return {"text": response_text, "hangup": result.get("should_end", False)}
+    return {"text": response_text, "hangup": hangup}
 
 
 # ── Twilio Media Streams WebSocket ────────────────────────────────────────────
@@ -358,14 +362,17 @@ async def twilio_stream(ws: WebSocket):
             timing.reset()
             t_turn_start = time.time()
             turn_number = timing._call["turn_count"] + 1
+            log_event("turn_start", thread_id=call_sid or "", transcript=transcript[:200])
 
             try:
                 reply = await loop.run_in_executor(
                     _executor, _graph_reply, transcript, call_sid or "", from_number
                 )
-            except GraphRecursionError:
+            except GraphRecursionError as e:
+                log_event("graph_error", thread_id=call_sid or "", error_type="GraphRecursionError", message=str(e))
                 reply = {"text": "I'm getting a bit turned around. Could you re-state what you need?", "hangup": False}
             except Exception as e:
+                log_event("graph_error", thread_id=call_sid or "", error_type=type(e).__name__, message=str(e))
                 logger.error(f"Agent error [{call_sid}]: {e}", exc_info=True)
                 reply = {"text": "Something went wrong. Please try again or ask airport staff for help.", "hangup": False}
 
@@ -389,6 +396,12 @@ async def twilio_stream(ws: WebSocket):
 
             turn_total = time.time() - t_turn_start
             logger.info(timing.summary(turn_total))
+            log_event(
+                "turn_latency",
+                thread_id=call_sid or "",
+                latency_ms=turn_total * 1000,
+                hangup=bool(reply.get("hangup")),
+            )
             try:
                 await loop.run_in_executor(_executor, lambda: insert_turn(
                     call_id=call_sid or str(uuid.uuid4()),
@@ -467,6 +480,7 @@ async def twilio_stream(ws: WebSocket):
                             started_at=call_started_at,
                         ))
                         logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number}")
+                        log_event("call_start", thread_id=call_sid or "", from_number=from_number or "")
 
                     elif event == "media":
                         media_count += 1
@@ -491,6 +505,7 @@ async def twilio_stream(ws: WebSocket):
     finally:
         await transcript_q.put(None)  # stop agent worker
         await worker
+        log_event("call_end", thread_id=call_sid or "", from_number=from_number or "")
         logger.info(f"Stream cleaned up: {stream_sid}")
 
         # Write analytics — non-blocking, never raises
@@ -742,6 +757,25 @@ async def gate_change(body: GateChangeRequest):
     except Exception as e:
         logger.error(f"SMS fallback failed: {e}")
         return {"status": "error", "error": str(e)}
+
+
+# ── Map cache ─────────────────────────────────────────────────────────────────
+
+class MapRefreshRequest(BaseModel):
+    airport_id: str
+
+
+@app.post("/map/refresh")
+async def map_refresh(body: MapRefreshRequest):
+    """Force-invalidate the in-process map cache and reload from Supabase."""
+    invalidate_map_cache(body.airport_id)
+    loop = asyncio.get_running_loop()
+    try:
+        levels = await loop.run_in_executor(_executor, load_map_levels, body.airport_id)
+        return {"status": "refreshed", "airport_id": body.airport_id, "levels": len(levels)}
+    except Exception as e:
+        logger.error(f"Map refresh failed [{body.airport_id}]: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

@@ -141,17 +141,7 @@ def resolve_poi(
 @tool(args_schema=RouteInput)
 def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Get shortest path between two POIs. start and end must be POI ids returned by find_poi."""
-    # Refresh start from state so the route always begins from the user's
-    # actual current location, not a hallucinated or stale one from the LLM.
     print("[thinking]")
-    user_id = state.get("user_id") if state else None
-    state_loc = state.get("current_location") if state else None
-    if state_loc and state_loc != start:
-        start = state_loc
-    elif user_id:
-        fresh = get_last_location(user_id)
-        if fresh and fresh != start:
-            start = fresh
 
     levels = load_map_levels(airport_id)
     result = dijkstra_multilevel(levels, start, end)

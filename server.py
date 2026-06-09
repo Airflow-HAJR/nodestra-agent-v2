@@ -28,8 +28,9 @@ from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn,
 from agent.graph import bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
-    CARTESIA_VOICE_ID,
+    CARTESIA_EMOTION,
     CARTESIA_MODEL_ID,
+    CARTESIA_VOICE_ID,
     DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
@@ -152,6 +153,7 @@ def _cartesia_tts_mp3_url(text: str) -> str | None:
                 "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
                 "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
                 "language": "en",
+                "generation_config": {"emotion": CARTESIA_EMOTION},
             },
             timeout=10,
         )
@@ -176,6 +178,7 @@ def _cartesia_tts_mulaw_iter(text: str):
                 "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
                 "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
                 "language": "en",
+                "generation_config": {"emotion": CARTESIA_EMOTION},
             },
             timeout=15,
         )
@@ -369,7 +372,10 @@ async def twilio_stream(ws: WebSocket):
             # Set by sentence_cb(None) when streaming completes; checked after graph returns.
             sentence_did_stream = threading.Event()
 
+            bytes_sent = 0
+
             async def _drain_audio() -> None:
+                nonlocal bytes_sent
                 while True:
                     chunk = await audio_q.get()
                     if chunk is None:
@@ -381,6 +387,7 @@ async def twilio_stream(ws: WebSocket):
                                 "streamSid": stream_sid,
                                 "media": {"payload": base64.b64encode(chunk).decode()},
                             })
+                            bytes_sent += len(chunk)
                         except Exception as e:
                             logger.error(f"Audio send failed [{call_sid}]: {e}")
 
@@ -465,6 +472,10 @@ async def twilio_stream(ws: WebSocket):
                 logger.exception("insert_turn failed in agent_worker")
 
             if reply.get("hangup") and _twilio and call_sid:
+                # Wait for Twilio to finish playing buffered audio before hanging up.
+                # At 8 kHz μ-law, 1 byte = 1 sample = 1/8000 s. Add 0.5 s network buffer.
+                if bytes_sent > 0:
+                    await asyncio.sleep(bytes_sent / 8000.0 + 0.5)
                 try:
                     await loop.run_in_executor(
                         _executor,

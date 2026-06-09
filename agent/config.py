@@ -46,6 +46,7 @@ MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY", "")
 CARTESIA_API_KEY = os.environ.get("CARTESIA_API_KEY", "")
 CARTESIA_VOICE_ID = os.environ.get("CARTESIA_VOICE_ID", "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4")
 CARTESIA_MODEL_ID = os.environ.get("CARTESIA_MODEL_ID", "sonic-3.5")
+CARTESIA_EMOTION = os.environ.get("CARTESIA_EMOTION", "enthusiastic")
 
 # TTS provider: "elevenlabs" | "cartesia"
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")

@@ -398,6 +398,36 @@ def update_user_memory(
     return "Got it, I'll remember that."
 
 
+# ---------------------------------------------------------------------------
+# Local vector search tools
+# ---------------------------------------------------------------------------
+
+class SearchFlightsInput(BaseModel):
+    query: str = Field(description="Natural language query about a flight, e.g. 'United flight to Denver' or 'WN 2341'")
+
+@tool(args_schema=SearchFlightsInput)
+def search_flight_info(query: str) -> str:
+    """Look up OAK departure info — gate, time, boarding status — for a specific flight or airline."""
+    from agent.local_search import search_flights
+    results = search_flights(query)
+    if not results:
+        return "No matching flights found in the departure board."
+    return "\n---\n".join(results)
+
+
+class SearchStoresInput(BaseModel):
+    query: str = Field(description="Natural language query about stores or restaurants, e.g. 'coffee near gate 10' or 'sushi'")
+
+@tool(args_schema=SearchStoresInput)
+def search_store_info(query: str) -> str:
+    """Look up OAK airport stores, restaurants, and amenities — hours, location, payment options."""
+    from agent.local_search import search_stores
+    results = search_stores(query)
+    if not results:
+        return "No matching stores or restaurants found."
+    return "\n---\n".join(results)
+
+
 TOOLS = [
     find_poi,
     get_route,
@@ -409,4 +439,6 @@ TOOLS = [
     end_call,
     update_user_memory,
     recall_user_memories,
+    search_flight_info,
+    search_store_info,
 ]

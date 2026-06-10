@@ -31,6 +31,28 @@ def get_last_location(user_id: str) -> str | None:
         return None
 
 
+def get_last_location_with_name(user_id: str) -> tuple[str | None, str | None]:
+    """Return (poi_id, poi_name) for the user's last known location."""
+    if not supabase_ok():
+        return None, None
+    try:
+        result = (
+            get_supabase()
+            .table("user_memory")
+            .select("last_location,last_location_name")
+            .eq("user_id_hash", hash_user_id(user_id))
+            .maybe_single()
+            .execute()
+        )
+        data = _safe_data(result)
+        return data.get("last_location"), data.get("last_location_name")
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
+        logger.exception("get_last_location_with_name failed")
+        return None, None
+
+
 def update_location(user_id: str, poi_id: str, poi_name: str) -> None:
     upsert_user_memory(
         hash_user_id(user_id),

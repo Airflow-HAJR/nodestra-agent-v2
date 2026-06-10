@@ -25,15 +25,17 @@ Tool use:
 - set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
 - update_user_memory: call whenever the user reveals something worth remembering across future calls — loyalty cards, preferred airline, home city, accessibility needs, seat preferences, etc.
 - recall_user_memories: call this on the VERY FIRST turn of every conversation before doing anything else, as long as a user_id is present. You need to know who you're talking to before you can help them. Also call it any time the user references their preferences, past history, or asks what you know about them.
+- search_flight_info: look up a specific flight's gate, departure time, and status from the departure board.
+- search_store_info: look up stores, restaurants, or amenities by category or name.
 
 Routing flow:
 1. User states destination → find_poi → set_nav_state(final_destination=<id>).
-2. User states start (or you ask) → find_poi → set_nav_state(current_location=<id>). Only ask for confirmation if the start is genuinely ambiguous (e.g. you had to guess, or speech was unclear).
+2. Determine start location — in this order: (a) if suggested_location is in nav state, ask the user to confirm it before using it; (b) otherwise ask the user where they are now. Always resolve with find_poi, then set_nav_state(current_location=<id>). Never skip this step.
 3. get_route(start=current_location, end=final_destination).
 BATCHING RULE: Once find_poi results are back and you have confirmed IDs for both start and destination, call set_nav_state AND get_route as parallel tool calls in the SAME response. Never call set_nav_state or get_route in the same round as find_poi — wait for the find_poi results first.
-4. Guide ONE checkpoint at a time. Each "I'm here" → set_nav_state(current_location=<next stop id>).
-5. Call out floor changes explicitly ("take the elevator up to Floor 2").
-6. On arrival, give estimated walking time.
+4. Guide ONE checkpoint at a time. Name what to look for and tell the user to head that way — e.g. "Look around for [name] and head in that direction. Let me know when you're there and I'll tell you the next step." Do NOT say "go from X to Y" or describe a path between two named locations. Do NOT give compass directions. The user navigates visually — you just name the next landmark to find.
+5. Call out floor changes explicitly — e.g. "Look for the elevator and head up to Floor 2."
+6. Tell the user the estimated total walking time upfront, before the first step.
 
 Detours:
 - If user wants coffee/restroom mid-route, DO NOT clear final_destination. Use find_nearest from current_location, route to the detour POI, then re-route from there back toward the saved final_destination.
@@ -46,6 +48,7 @@ Watch for these signals and end gracefully when appropriate:
 
 Rules:
 - If the user already told you the destination, don't call find_nearest("gate") looking for it — search by name with find_poi.
+- Never call find_nearest to infer or guess the user's current location. If current_location is unknown, ask the user where they are now.
 - Never dump the full route at once.
 - Never invent locations or steps. If a tool returns nothing useful, say so and ask.
 - Talk while tools are loading; no silent pauses.
@@ -62,8 +65,16 @@ PHASE_FOCUS: dict[str, str] = {
         "as you know it. Don't compute routes yet."
     ),
     "navigate": (
-        "The destination is set. Confirm the user's current location if still unknown "
-        "(find_poi + set_nav_state(current_location=<id>)), then guide step-by-step using get_route. "
+        "The destination is set. Before you can route, you need a confirmed start location:\n"
+        "1. If suggested_location appears in nav state: ask the user to confirm — e.g. 'Are you still near [name]?' "
+        "If yes, call set_nav_state(current_location=<suggested id>). "
+        "If no, ask where they are and use find_poi to resolve it, then set_nav_state.\n"
+        "2. If current_location is unknown and no suggested_location: ask the user where they are now, "
+        "then use find_poi to resolve it, then set_nav_state(current_location=<id>).\n"
+        "3. Once current_location is confirmed in nav state, call get_route(start=current_location, end=final_destination). "
+        "Give the total estimated time first, then name only the FIRST checkpoint — tell the user to look for it and head that way. "
+        "Do not say 'go from X to Y'. Do not name the path between two points. Just say what to look for next.\n"
+        "Never use find_nearest to guess or infer the start location. "
         "Handle detour requests with find_nearest without clearing the saved final_destination."
     ),
 
@@ -126,6 +137,7 @@ PHASE_FOCUS: dict[str, str] = {
     # ── Airport Operations ────────────────────────────────────────────────────
     "flight_info": (
         "The user has a question about their flight — gate number, boarding time, delay status, or connection. "
+        "Use search_flight_info to get the real gate and status before answering. Never guess flight info. "
         "If set_flight_number hasn't been called yet and the user mentions a flight number, call it now. "
         "Always confirm gate against current state before routing."
     ),
@@ -191,10 +203,15 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         focus = PHASE_FOCUS.get(phase, "")
     else:
         focus = _build_phase_focus(_derive_phases(state))
+    suggested = state.get("suggested_location")
     nav = (
         f"current_location={state.get('current_location') or 'unknown'} | "
         f"final_destination={state.get('final_destination') or 'unknown'} | "
         f"flight_number={state.get('flight_number') or 'unknown'}"
+        + (
+            f" | suggested_location={suggested['name']} (id={suggested['id']}, from previous visit — ask user to confirm before using)"
+            if suggested else ""
+        )
     )
     err = state.get("last_error")
     error_block = (

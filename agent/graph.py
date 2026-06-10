@@ -11,7 +11,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.config import MEMORY_ENABLED
 from agent.llm import build_llm
-from agent.memory import get_last_flight, get_last_location
+from agent.memory import get_last_flight, get_last_location_with_name
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.timing import add_llm, add_supermemory, add_tool
@@ -48,8 +48,16 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     ],
     "set_nav_state": [],   # silent — just a state update
     "end_call": [],        # silent — just a state update
+    "search_flight_info": [
+        "Checking the departure board.",
+        "Looking up that flight.",
+    ],
+    "search_store_info": [
+        "Looking up the shops and restaurants.",
+        "Checking what's available.",
+    ],
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes", "search_flight_info", "search_store_info"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",
@@ -216,11 +224,13 @@ _INTENT_KEYWORDS: dict[str, set[str]] = {
         "snack", "lunch", "dinner", "breakfast", "meal", "sandwich", "pizza",
         "sushi", "burger", "salad", "bakery", "juice", "smoothie", "beer",
         "wine", "cocktail", "market", "kiosk", "boba", "tea", "ramen", "tacos",
+        "search_store_info",
     },
     "shopping": {
         "shop", "store", "duty-free", "dutyfree", "newsstand", "buy", "purchase",
         "souvenir", "gift", "retail", "boutique", "pharmacy", "drugstore",
         "bookstore", "electronics", "sunglasses", "clothes", "fashion", "perfume",
+        "search_store_info",
     },
     "lounge_access": {
         "lounge", "priority pass", "dragon pass", "club", "amex lounge",
@@ -239,6 +249,7 @@ _KEYWORD_ONLY_INTENTS: dict[str, set[str]] = {
     "flight_info": {
         "flight", "gate", "boarding", "delay", "depart", "arrival", "connection",
         "layover", "terminal", "on time", "cancelled", "status",
+        "search_flight_info",
     },
     "airport_infrastructure": {
         "tsa", "security", "customs", "immigration", "precheck", "clear",
@@ -479,12 +490,13 @@ def _init_node(state: State) -> dict:
     if not user_id or not MEMORY_ENABLED:
         return {}
     result: dict = {}
-    if not state.get("current_location"):
+    if not state.get("current_location") and not state.get("suggested_location"):
         t0 = time.time()
-        poi_id = get_last_location(user_id)
+        poi_id, poi_name = get_last_location_with_name(user_id)
         add_supermemory(time.time() - t0)
         if poi_id:
-            result["current_location"] = poi_id
+            # Don't set current_location directly — agent must confirm with user first.
+            result["suggested_location"] = {"id": poi_id, "name": poi_name or poi_id}
     if not state.get("flight_number"):
         t0 = time.time()
         flight = get_last_flight(user_id)

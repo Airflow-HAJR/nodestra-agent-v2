@@ -53,6 +53,19 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Oakland Airport Agent")
 _executor = ThreadPoolExecutor(max_workers=10)
 
+# mulaw silence ≈ 0xFF/0x7F; voice = significant deviation from those values.
+_MULAW_SILENCE = frozenset({0xFF, 0x7F})
+_VAD_THRESHOLD = 0.10  # fraction of non-silence bytes required to consider chunk voiced
+
+def _mulaw_voice_ratio(data: bytes) -> float:
+    if not data:
+        return 0.0
+    return sum(1 for b in data if b not in _MULAW_SILENCE) / len(data)
+
+def _mulaw_has_voice(data: bytes) -> bool:
+    """Return True if mulaw audio chunk contains voice activity."""
+    return len(data) >= 20 and _mulaw_voice_ratio(data) > _VAD_THRESHOLD
+
 # ── Clients ───────────────────────────────────────────────────────────────────
 
 _twilio = (
@@ -350,6 +363,12 @@ async def twilio_stream(ws: WebSocket):
     # Transcripts from Deepgram → agent worker
     transcript_q: asyncio.Queue[str | None] = asyncio.Queue()
 
+    # Set when Deepgram fires TurnResumed (user kept speaking after EagerEndOfTurn).
+    # Shared between async _dg_receiver and threaded sentence_cb, so use threading.Event.
+    turn_cancelled = threading.Event()
+    # Set while agent audio chunks are actively being sent to Twilio.
+    is_playing = threading.Event()
+
     # ── Agent + TTS worker ────────────────────────────────────────────────────
 
     async def _agent_worker():
@@ -362,6 +381,7 @@ async def twilio_stream(ws: WebSocket):
                 logger.info(f"Duplicate [{call_sid}], skipping")
                 continue
 
+            turn_cancelled.clear()
             timing.reset()
             t_turn_start = time.time()
             turn_number = timing._call["turn_count"] + 1
@@ -379,9 +399,15 @@ async def twilio_stream(ws: WebSocket):
                 while True:
                     chunk = await audio_q.get()
                     if chunk is None:
+                        is_playing.clear()
                         break
+                    if turn_cancelled.is_set():
+                        continue  # drain the queue but don't send
                     if stream_sid:
                         try:
+                            if not is_playing.is_set():
+                                logger.info(f"Agent audio started [{call_sid}]")
+                                is_playing.set()
                             await ws.send_json({
                                 "event": "media",
                                 "streamSid": stream_sid,
@@ -390,6 +416,7 @@ async def twilio_stream(ws: WebSocket):
                             bytes_sent += len(chunk)
                         except Exception as e:
                             logger.error(f"Audio send failed [{call_sid}]: {e}")
+                is_playing.clear()
 
             drain_task = asyncio.create_task(_drain_audio())
 
@@ -409,6 +436,8 @@ async def twilio_stream(ws: WebSocket):
                 if text_or_none is None:
                     sentence_did_stream.set()
                     loop.call_soon_threadsafe(audio_q.put_nowait, None)
+                    return
+                if turn_cancelled.is_set():
                     return
                 try:
                     t = time.time()
@@ -433,6 +462,15 @@ async def twilio_stream(ws: WebSocket):
                 log_event("graph_error", thread_id=call_sid or "", error_type=type(e).__name__, message=str(e))
                 logger.error(f"Agent error [{call_sid}]: {e}", exc_info=True)
                 reply = {"text": "Something went wrong. Please try again or ask airport staff for help.", "hangup": False}
+
+            # If TurnResumed fired while we were processing, the user kept speaking.
+            # Discard this response and let the subsequent EndOfTurn handle the full utterance.
+            if turn_cancelled.is_set():
+                logger.info(f"Turn cancelled (TurnResumed) [{call_sid}], discarding response")
+                if not sentence_did_stream.is_set():
+                    audio_q.put_nowait(None)
+                await drain_task
+                continue
 
             # If sentence streaming didn't complete (error path, or graph emitted no text),
             # fall back to full-text TTS so the drain task always receives a None terminator.
@@ -513,9 +551,27 @@ async def twilio_stream(ws: WebSocket):
                         else:
                             continue
 
-                        if event in ("EndOfTurn", "EagerEndOfTurn"):
+                        if event == "TurnResumed":
+                            # User continued speaking after EagerEndOfTurn — cancel in-flight response.
+                            logger.info(f"Deepgram [TurnResumed]: cancelling in-flight turn [{call_sid}]")
+                            turn_cancelled.set()
+                            if stream_sid:
+                                try:
+                                    await ws.send_json({"event": "clear", "streamSid": stream_sid})
+                                except Exception as e:
+                                    logger.error(f"Twilio clear on TurnResumed failed [{call_sid}]: {e}")
+                        elif event in ("EndOfTurn", "EagerEndOfTurn"):
                             logger.info(f"Deepgram [{event}]: '{transcript}'")
                             if transcript:
+                                # Barge-in: if TTS is playing when user speech is confirmed, stop it.
+                                if is_playing.is_set() and not turn_cancelled.is_set():
+                                    logger.info(f"Barge-in on {event} [{call_sid}]")
+                                    turn_cancelled.set()
+                                    if stream_sid:
+                                        try:
+                                            await ws.send_json({"event": "clear", "streamSid": stream_sid})
+                                        except Exception as e:
+                                            logger.error(f"Twilio clear on barge-in failed [{call_sid}]: {e}")
                                 await transcript_q.put(transcript)
                 except Exception as e:
                     logger.error(f"_dg_receiver error: {e}", exc_info=True)
@@ -549,7 +605,21 @@ async def twilio_stream(ws: WebSocket):
                         media_count += 1
                         if media_count % 50 == 1:
                             logger.info(f"Media chunks forwarded to Deepgram: {media_count}")
-                        await dg_socket.send_media(base64.b64decode(msg["media"]["payload"]))
+                        payload = base64.b64decode(msg["media"]["payload"])
+                        await dg_socket.send_media(payload)
+                        # Barge-in VAD: log ratio when agent is speaking so we can tune the threshold.
+                        if is_playing.is_set() and not turn_cancelled.is_set():
+                            ratio = _mulaw_voice_ratio(payload)
+                            if ratio > 0.02:
+                                logger.info(f"VAD ratio={ratio:.2f} len={len(payload)} [{call_sid}]")
+                            if ratio > _VAD_THRESHOLD:
+                                logger.info(f"Barge-in detected (ratio={ratio:.2f}) [{call_sid}]")
+                                turn_cancelled.set()
+                                if stream_sid:
+                                    try:
+                                        await ws.send_json({"event": "clear", "streamSid": stream_sid})
+                                    except Exception as e:
+                                        logger.error(f"Twilio clear on barge-in failed [{call_sid}]: {e}")
 
                     elif event == "stop":
                         logger.info(f"Stream stopped: {stream_sid} (total media chunks: {media_count})")

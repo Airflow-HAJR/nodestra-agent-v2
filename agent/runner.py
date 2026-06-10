@@ -91,7 +91,6 @@ def run(user_id: str | None = None):
         total = time.time() - t0
         turn_stats = timing.turn_snapshot(total)
         tools_used = get_turn_tools_used()
-
         insert_turn(
             call_id=session_id,
             turn_number=turn_number,

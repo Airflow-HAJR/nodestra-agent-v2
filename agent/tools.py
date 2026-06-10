@@ -18,7 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.memory import get_last_location, save_conversation, update_flight, update_location
+from agent.memory import get_last_location, save_conversation, search_memories, update_flight, update_location
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +428,31 @@ def search_store_info(query: str) -> str:
     return "\n---\n".join(results)
 
 
+class SearchUserMemoriesInput(BaseModel):
+    query: str = Field(
+        description=(
+            "A short phrase describing what you want to look up, "
+            "e.g. 'credit cards', 'preferred airline', 'home city'."
+        )
+    )
+
+
+@tool(args_schema=SearchUserMemoriesInput)
+def search_user_memories(
+    query: str,
+    state: Annotated[dict, InjectedState] = {},
+) -> str:
+    """Search this user's stored memories for facts relevant to a short query phrase.
+    Returns only entries above a relevance threshold — e.g. querying 'credit cards'
+    returns something like 'card: Amex Platinum'. Use this for targeted lookups
+    instead of recall_user_memories when you only need specific facts."""
+    print("[thinking]")
+    user_id = state.get("user_id") if state else None
+    if not user_id:
+        return "No user profile — this is a guest session with no stored memories."
+    return search_memories(user_id, query)
+
+
 TOOLS = [
     find_poi,
     get_route,
@@ -441,4 +466,5 @@ TOOLS = [
     recall_user_memories,
     search_flight_info,
     search_store_info,
+    search_user_memories,
 ]

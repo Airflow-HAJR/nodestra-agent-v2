@@ -224,9 +224,9 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
     if profile.get("visit_count"):
         session_parts.append(f"visit_count={profile['visit_count']}")
     if profile.get("last_flight"):
-        session_parts.append(f"last_flight={profile['last_flight']}")
-    if profile.get("last_location_name"):
-        session_parts.append(f"last_location={profile['last_location_name']}")
+        session_parts.append(f"last_flight_number={profile['last_flight']}")
+    if profile.get("last_location"):
+        session_parts.append(f"last_location_id={profile['last_location']}")
     session_block = f"USER SESSION: {' | '.join(session_parts)}" if session_parts else ""
 
     commerce = state.get("commerce_context")

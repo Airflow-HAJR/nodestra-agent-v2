@@ -552,6 +552,7 @@ def _init_node(state: State) -> dict:
         result["user_profile"] = {
             "visit_count": meta.get("visit_count"),
             "last_flight": meta.get("last_flight"),
+            "last_location": meta.get("last_location"),
             "last_location_name": meta.get("last_location_name"),
             "last_seen": meta.get("last_seen"),
         }

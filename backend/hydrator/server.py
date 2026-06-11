@@ -100,7 +100,7 @@ def _store_to_text(s: dict) -> str:
 def _upsert(rows: list[dict]) -> None:
     if not rows:
         return
-    _get_supabase().table("vector_documents").upsert(rows, on_conflict="id").execute()
+    _get_supabase().table("vector_documents").upsert(rows, on_conflict="id,airport_id").execute()
 
 
 def seed_stores(airport_id: str) -> None:

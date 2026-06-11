@@ -337,42 +337,29 @@ def end_call(
 # User memory tools
 # ---------------------------------------------------------------------------
 
-@tool
-def recall_user_memories(state: Annotated[dict, InjectedState] = {}) -> str:
-    """Retrieve everything stored about this user from previous conversations —
-    preferences, loyalty cards, flight history, home city, etc.
-    Call this whenever the user asks what you remember about them,
-    or when knowing their history would help you assist them better."""
+class RecallUserMemoriesInput(BaseModel):
+    query: str = Field(
+        description=(
+            "A short phrase describing what you want to recall, based on what the user is asking about. "
+            "E.g. 'food and dietary restrictions', 'payment cards', 'accessibility needs', 'lounge access'."
+        )
+    )
+
+
+@tool(args_schema=RecallUserMemoriesInput)
+def recall_user_memories(
+    query: str,
+    state: Annotated[dict, InjectedState] = {},
+) -> str:
+    """Search this user's stored preferences for facts relevant to the current conversation.
+    Pass a short phrase describing the topic (e.g. 'food preferences', 'payment cards').
+    Only returns preference facts above a relevance threshold — no metadata like visit count or location.
+    Call whenever the user asks what you remember, or when their history would help you assist them."""
     print("[thinking]")
     user_id = state.get("user_id") if state else None
     if not user_id:
         return "No user profile — this is a guest session with no stored memories."
-    try:
-        from agent.analytics import _safe_data, hash_user_id
-        from agent.db import get_service_client
-        result = _safe_data(
-            get_service_client()
-            .table("user_memory")
-            .select("profile_facts, last_flight, last_location_name, visit_count, last_seen")
-            .eq("user_id_hash", hash_user_id(user_id))
-            .maybe_single()
-            .execute()
-        )
-        if not result:
-            return "No memories stored for this user yet."
-        parts: list[str] = []
-        if result.get("visit_count"):
-            parts.append(f"visit_count: {result['visit_count']}")
-        if result.get("last_flight"):
-            parts.append(f"last_flight: {result['last_flight']}")
-        if result.get("last_location_name"):
-            parts.append(f"last_location: {result['last_location_name']}")
-        facts: dict = result.get("profile_facts") or {}
-        for k, v in facts.items():
-            parts.append(f"{k}: {v}")
-        return "\n".join(parts) if parts else "No memories stored for this user yet."
-    except Exception as e:
-        return f"Could not retrieve memories: {e}"
+    return search_memories(user_id, query)
 
 
 class UpdateUserMemoryInput(BaseModel):

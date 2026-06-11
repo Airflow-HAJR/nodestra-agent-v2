@@ -9,7 +9,7 @@ You are a voice navigation assistant for Oakland International (OAK). Brief, cle
 
 NAV STATE: {nav}
 CURRENT TIME: May 17, 12:00 pm
-
+{session_block}
 PHASE FOCUS: {phase_focus}
 {error_block}{commerce_block}
 Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
@@ -24,8 +24,8 @@ Tool use:
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
 - set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
 - update_user_memory: call whenever the user reveals something worth remembering across future calls — loyalty cards, preferred airline, home city, accessibility needs, seat preferences, etc.
-- recall_user_memories: call this on the VERY FIRST turn of every conversation before doing anything else, as long as a user_id is present. You need to know who you're talking to before you can help them. Also call it any time the user references their preferences, past history, or asks what you know about them.
-- search_user_memories: call mid-conversation when you need a specific fact and don't want to reload everything. Pass a short phrase like "credit cards", "preferred airline", "dietary restrictions", "accessibility needs". Only returns entries relevant to that phrase above a similarity threshold — e.g. "credit cards" → "card: Amex Platinum".
+- recall_user_memories: call whenever the user asks what you remember about them, or when their history would help you assist. Pass a short query phrase based on the topic (e.g. "food preferences", "payment cards", "lounge access"). Returns only relevant preference facts above a relevance threshold.
+- search_user_memories: same as recall_user_memories — use either for targeted mid-conversation lookups. Pass a short phrase like "credit cards", "preferred airline", "dietary restrictions".
 - search_flight_info: look up a specific flight's gate, departure time, and status from the departure board.
 - search_store_info: look up stores, restaurants, or amenities by category or name.
 
@@ -219,21 +219,34 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         if err
         else ""
     )
+    profile = state.get("user_profile") or {}
+    session_parts: list[str] = []
+    if profile.get("visit_count"):
+        session_parts.append(f"visit_count={profile['visit_count']}")
+    if profile.get("last_flight"):
+        session_parts.append(f"last_flight={profile['last_flight']}")
+    if profile.get("last_location_name"):
+        session_parts.append(f"last_location={profile['last_location_name']}")
+    session_block = f"USER SESSION: {' | '.join(session_parts)}" if session_parts else ""
+
     commerce = state.get("commerce_context")
     commerce_block = (
-        f"\nCOMMERCE CONTEXT (pre-fetched this turn — act on it immediately):\n{commerce}\n"
-        "COMMERCE INSTRUCTIONS (voice — 2-3 sentences max, NO lists, NO markdown, NO bullet points):\n"
-        "Open with one sentence that names the key preference AND its source venue if one appears in "
-        "PAYMENT_PREFERENCES (e.g. 'Based on your halal preference and your last visit to Chase Center '  "
-        "where you paid with Amex...'). Then name 2 options from COMMERCE_POIS in that same flowing sentence "
-        "or the next. If any POI has a standout benefit for the user (cashback, Priority Pass, dining credit), "
-        "call it out explicitly in the final sentence. End with 'Want directions to one of them?'\n"
+        f"\nCOMMERCE CONTEXT (user preferences retrieved from memory):\n{commerce}\n"
+        "COMMERCE INSTRUCTIONS: The user has just indicated which preference they want you to search for. "
+        "Call search_store_info using their stated preference as the query. "
+        "Then critically evaluate the results — only recommend a result if it genuinely matches what the user asked for. "
+        "If the results do not actually match (e.g. user asked for Mediterranean but results are Mexican), "
+        "say so honestly: tell them you couldn't find that specific option at OAK, then offer the closest "
+        "relevant alternative only if it's meaningfully related (e.g. halal-certified as a dietary overlap). "
+        "Never present a non-matching result as if it is what they asked for. "
+        "Keep it to 2-3 spoken sentences, no lists or markdown.\n"
         if commerce
         else ""
     )
     current_time = datetime.now().strftime("%I:%M %p")
     return SYSTEM_TEMPLATE.format(
         nav=nav,
+        session_block=session_block,
         phase_focus=focus,
         error_block=error_block,
         commerce_block=commerce_block,

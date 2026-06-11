@@ -50,6 +50,10 @@ from agent.logger import log_event
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy third-party HTTP logs
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+
 app = FastAPI(title="Oakland Airport Agent")
 _executor = ThreadPoolExecutor(max_workers=10)
 
@@ -385,6 +389,7 @@ async def twilio_stream(ws: WebSocket):
             timing.reset()
             t_turn_start = time.time()
             turn_number = timing._call["turn_count"] + 1
+            logger.info(f"─── TURN {turn_number} ──────────────────────────────────────────")
             log_event("turn_start", thread_id=call_sid or "", transcript=transcript[:200])
 
             # Single queue drains all audio: filler → sentence-streamed response (or fallback TTS).
@@ -493,6 +498,7 @@ async def twilio_stream(ws: WebSocket):
 
             turn_total = time.time() - t_turn_start
             logger.info(timing.summary(turn_total))
+            logger.info("─────────────────────────────────────────────────────────")
             log_event(
                 "turn_latency",
                 thread_id=call_sid or "",
@@ -604,7 +610,7 @@ async def twilio_stream(ws: WebSocket):
                     elif event == "media":
                         media_count += 1
                         if media_count % 50 == 1:
-                            logger.info(f"Media chunks forwarded to Deepgram: {media_count}")
+                            logger.debug(f"Media chunks forwarded to Deepgram: {media_count}")
                         payload = base64.b64decode(msg["media"]["payload"])
                         await dg_socket.send_media(payload)
                         # Barge-in VAD: log ratio when agent is speaking so we can tune the threshold.

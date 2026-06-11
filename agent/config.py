@@ -10,6 +10,7 @@ AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
 AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
 AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 
 # Supabase (map data)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -50,3 +51,4 @@ TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 
 # Feature flags
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"
+FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"

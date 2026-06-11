@@ -22,6 +22,8 @@ def _empty_airport_state() -> dict:
         "next_poll": None,
         "poll_count": 0,
         "status": "starting",
+        # flight_number → [phone_number, ...]
+        "subscribers": {},
     }
 
 
@@ -63,3 +65,21 @@ def remove_tracked(code: str, flight: str) -> None:
         tracked = airports_state[code]["tracked"]
         if flight in tracked:
             tracked.remove(flight)
+
+
+def add_subscriber(code: str, flight: str, phone: str) -> None:
+    """Subscribe a phone number to changes for a specific tracked flight."""
+    code = code.upper()
+    ensure_airport(code)
+    with state_lock:
+        subs = airports_state[code].setdefault("subscribers", {})
+        phones = subs.setdefault(flight, [])
+        if phone not in phones:
+            phones.append(phone)
+
+
+def get_subscribers(code: str, flight: str) -> list:
+    """Return all phone numbers subscribed to a flight's changes."""
+    code = code.upper()
+    with state_lock:
+        return list(airports_state.get(code, {}).get("subscribers", {}).get(flight, []))

@@ -49,6 +49,9 @@ CARTESIA_EMOTION = os.environ.get("CARTESIA_EMOTION", "enthusiastic")
 # TTS provider: "elevenlabs" | "cartesia"
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 
+# GateGetter service URL (flight tracking)
+GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
+
 # Feature flags
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"
 FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"

@@ -21,7 +21,7 @@ from airports import build_url, list_supported, AIRPORT_SLUGS
 from state import (
     airports_state, state_lock, shutdown_event,
     ensure_airport, get_airport_state, remove_airport,
-    add_tracked, remove_tracked,
+    add_tracked, remove_tracked, add_subscriber,
 )
 from scraper import scrape_once
 
@@ -115,6 +115,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length)) if length else {}
                 flight = body.get("flight", "").strip().upper()
                 airport = body.get("airport", "").strip().upper() or _parse_airport(qs)
+                phone = body.get("phone", "").strip()
                 if not flight:
                     self._json_response(400, {"error": "missing 'flight' field"})
                     return
@@ -123,7 +124,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 ensure_airport(airport)
                 add_tracked(airport, flight)
-                self._json_response(200, {"ok": True, "tracked": flight, "airport": airport})
+                if phone:
+                    add_subscriber(airport, flight, phone)
+                resp = {"ok": True, "tracked": flight, "airport": airport}
+                if phone:
+                    resp["subscribed"] = phone
+                self._json_response(200, resp)
             except Exception as e:
                 self._json_response(400, {"error": str(e)})
 
@@ -160,8 +166,27 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _background_poller():
+    """Periodically scrape airports that have tracked flights, triggering change notifications."""
+    interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
+    print(f"[Poller] Started — polling every {interval}s when flights are tracked")
+    while not shutdown_event.wait(timeout=interval):
+        with state_lock:
+            airports = [code for code, st in airports_state.items() if st.get("tracked")]
+        if not airports:
+            continue
+        for airport in airports:
+            try:
+                print(f"[Poller] Scraping {airport} ({len(airports_state.get(airport, {}).get('tracked', []))} tracked flights)")
+                scrape_once(airport)
+            except Exception as e:
+                print(f"[Poller] Error scraping {airport}: {e}")
+    print("[Poller] Stopped")
+
+
 def main():
     import subprocess
+    import threading
 
     print("=" * 55)
     print("  GATEGETTER — ON-DEMAND FLIGHT SCRAPER (API)")
@@ -171,6 +196,9 @@ def main():
         subprocess.run(f"lsof -ti:{PORT} | xargs kill -9 2>/dev/null", shell=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(0.5)
+
+    poller = threading.Thread(target=_background_poller, daemon=True, name="gategetter-poller")
+    poller.start()
 
     server = ReuseHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"\n  API: http://localhost:{PORT}")

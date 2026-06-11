@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HYDRATION_ENABLED     = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"
-GATEGETTER_URL        = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
+GATEGETTER_URL        = os.environ.get("GATEGETTER_URL", "http://localhost:8081")  # mirrors agent/config.py
 HYDRATION_AIRPORT     = os.environ.get("HYDRATION_AIRPORT", "OAK")
 HYDRATION_INTERVAL    = int(os.environ.get("HYDRATION_INTERVAL_MINUTES", "5")) * 60
 SUPABASE_URL          = os.environ.get("SUPABASE_URL", "")

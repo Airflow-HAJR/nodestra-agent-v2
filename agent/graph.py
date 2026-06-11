@@ -57,8 +57,12 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Looking up the shops and restaurants.",
         "Checking what's available.",
     ],
+    "track_flight_changes": [
+        "Setting up flight tracking for you.",
+        "Registering your flight alert.",
+    ],
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes", "search_flight_info", "search_store_info"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes", "search_flight_info", "search_store_info", "track_flight_changes"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",

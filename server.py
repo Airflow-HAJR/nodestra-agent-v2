@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -35,6 +36,7 @@ from agent.config import (
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
+    GATEGETTER_URL,
     SERVER_BASE_URL,
     TTS_PROVIDER,
     TWILIO_ACCOUNT_SID,
@@ -595,7 +597,10 @@ async def twilio_stream(ws: WebSocket):
                     if event == "start":
                         stream_sid = msg["streamSid"]
                         call_sid = msg["start"]["callSid"]
-                        from_number = msg["start"].get("customParameters", {}).get("from_number")
+                        custom_params = msg["start"].get("customParameters", {})
+                        from_number = custom_params.get("from_number")
+                        call_type = custom_params.get("call_type", "inbound")
+                        initial_context = custom_params.get("initial_context", "")
                         call_started_at = time.time()
                         timing.call_reset()
                         _uid_hash = hash_user_id(from_number) if from_number else None
@@ -604,8 +609,13 @@ async def twilio_stream(ws: WebSocket):
                             user_id_hash=_uid_hash,
                             started_at=call_started_at,
                         ))
-                        logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number}")
+                        logger.info(f"Stream started: {stream_sid} call={call_sid} from={from_number} type={call_type}")
                         log_event("call_start", thread_id=call_sid or "", from_number=from_number or "")
+
+                        # For outbound calls the agent speaks first — inject the notification
+                        # context as the initial "user" message so the agent opens the call.
+                        if call_type == "outbound" and initial_context:
+                            await transcript_q.put(initial_context)
 
                     elif event == "media":
                         media_count += 1
@@ -898,6 +908,70 @@ async def gate_change(body: GateChangeRequest):
         return {"status": "error", "error": str(e)}
 
 
+# ── Flight-change outbound agent call ─────────────────────────────────────────
+
+class FlightChangeCallRequest(BaseModel):
+    phone: str
+    flight: str
+    airport: str = DEFAULT_AIRPORT
+    changes: list[dict]  # [{field, old_value, new_value}, ...]
+
+
+def _build_outbound_context(flight: str, changes: list[dict]) -> str:
+    """Build a concise context string injected as the agent's first message."""
+    parts = []
+    for c in changes:
+        field = c.get("field", "status")
+        old_v = c.get("old_value") or "unknown"
+        new_v = c.get("new_value") or "unknown"
+        parts.append(f"{field} changed from {old_v} to {new_v}")
+    change_desc = "; ".join(parts) if parts else "status updated"
+    return (
+        f"[OUTBOUND FLIGHT NOTIFICATION] You are calling a passenger on behalf of Oakland "
+        f"International Airport. Flight {flight}: {change_desc}. "
+        f"Greet them, inform them about this update concisely, and offer to help navigate "
+        f"to the new gate or answer any questions they have."
+    )
+
+
+@app.post("/flight-change-call")
+async def flight_change_call(body: FlightChangeCallRequest):
+    """Make an outbound call with the full voice agent to notify a passenger of flight changes.
+
+    Called by gategetter's auto_notify when significant changes are detected for a tracked flight.
+    The agent speaks first, delivering the notification and offering navigation help.
+    """
+    context = _build_outbound_context(body.flight, body.changes)
+
+    if not _twilio or not TWILIO_PHONE_NUMBER:
+        logger.info(f"[MOCK] Outbound agent call to {body.phone}: {context}")
+        return {"status": "mock", "context": context}
+
+    loop = asyncio.get_running_loop()
+    ws_url = SERVER_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+
+    vr = VoiceResponse()
+    connect = Connect()
+    stream = Stream(url=f"{ws_url}/twilio/stream")
+    stream.parameter(name="from_number", value=body.phone)
+    stream.parameter(name="call_type", value="outbound")
+    stream.parameter(name="initial_context", value=context)
+    connect.append(stream)
+    vr.append(connect)
+    twiml_str = str(vr)
+
+    try:
+        call = await loop.run_in_executor(
+            _executor,
+            lambda: _twilio.calls.create(to=body.phone, from_=TWILIO_PHONE_NUMBER, twiml=twiml_str),
+        )
+        logger.info(f"Outbound agent call to {body.phone} for flight {body.flight}: {call.sid}")
+        return {"status": "calling", "call_sid": call.sid}
+    except Exception as e:
+        logger.error(f"Outbound agent call failed for {body.phone}: {e}")
+        return {"status": "error", "error": str(e)}
+
+
 # ── Map cache ─────────────────────────────────────────────────────────────────
 
 class MapRefreshRequest(BaseModel):
@@ -922,6 +996,90 @@ async def map_refresh(body: MapRefreshRequest):
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Oakland Airport Agent"}
+
+
+# ── Flight watch background loop ──────────────────────────────────────────────
+
+# airport → { flight_number → last_scraped_flight_dict }
+_flight_watch_prev: dict[str, dict[str, dict]] = {}
+_flight_watch_prev_lock = threading.Lock()
+
+
+async def _flight_watch_loop():
+    """Poll gategetter for tracked flights and make outbound agent calls on changes."""
+    from agent.flight_tracker import (
+        find_significant_changes, get_subscribers, get_tracked, unsubscribe_flight,
+    )
+
+    interval = int(os.environ.get("POLL_INTERVAL_SECONDS", "120"))
+    logger.info(f"[FlightWatch] Started — polling every {interval}s")
+    loop = asyncio.get_running_loop()
+
+    await asyncio.sleep(interval)
+
+    while True:
+        try:
+            tracked = get_tracked()  # {airport: [flight, ...]}
+            for airport, flights in tracked.items():
+                if not flights:
+                    continue
+                try:
+                    resp = await loop.run_in_executor(
+                        _executor,
+                        lambda a=airport: _requests.get(
+                            f"{GATEGETTER_URL}/api/data?airport={a}", timeout=45
+                        ),
+                    )
+                    resp.raise_for_status()
+                    by_fn: dict[str, dict] = {
+                        f["flight_number"].strip().upper().replace(" ", ""): f
+                        for f in resp.json().get("flights", [])
+                        if f.get("flight_number")
+                    }
+                except Exception as e:
+                    logger.warning(f"[FlightWatch] Could not fetch {airport} data: {e}")
+                    continue
+
+                for flight in flights:
+                    curr = by_fn.get(flight)
+                    with _flight_watch_prev_lock:
+                        prev = _flight_watch_prev.get(airport, {}).get(flight)
+
+                    if curr:
+                        with _flight_watch_prev_lock:
+                            _flight_watch_prev.setdefault(airport, {})[flight] = curr
+
+                        if "depart" in (curr.get("status") or "").lower():
+                            unsubscribe_flight(airport, flight)
+                            logger.info(f"[FlightWatch] {flight} departed — unsubscribed")
+                            continue
+
+                    if prev and curr:
+                        changes = find_significant_changes(prev, curr)
+                        if not changes:
+                            continue
+                        phones = get_subscribers(airport, flight)
+                        logger.info(f"[FlightWatch] {flight} changed: {changes} → calling {phones}")
+                        for phone in phones:
+                            try:
+                                await flight_change_call(FlightChangeCallRequest(
+                                    phone=phone,
+                                    flight=flight,
+                                    airport=airport,
+                                    changes=changes,
+                                ))
+                            except Exception as e:
+                                logger.error(f"[FlightWatch] Outbound call failed {phone}: {e}")
+
+        except Exception as e:
+            logger.error(f"[FlightWatch] Loop error: {e}", exc_info=True)
+
+        await asyncio.sleep(interval)
+
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(_flight_watch_loop())
 
 
 if __name__ == "__main__":

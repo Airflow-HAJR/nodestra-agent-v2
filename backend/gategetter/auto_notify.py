@@ -66,47 +66,26 @@ def _estimate_time_diff_minutes(old_time: str, new_time: str) -> int | None:
 
 
 def _get_subscribers(flight_number: str, airport_code: str) -> list[str]:
-    """Look up phone numbers of passengers subscribed to a flight from Supabase."""
-    from supabase_cleanup import _get_client
+    """Look up phone numbers of passengers subscribed to a flight.
 
-    sb = _get_client()
-    try:
-        fp_resp = sb.table("flight_passengers") \
-            .select("passenger_id") \
-            .eq("flight_id", flight_number) \
-            .eq("airport_id", airport_code) \
-            .execute()
+    Checks local in-memory state first (registered via the voice agent's
+    track_flight_changes tool), then falls back to Supabase flight_passengers.
+    """
+    from state import get_subscribers
+    local_phones = get_subscribers(airport_code, flight_number)
 
-        if not fp_resp.data:
-            return []
-
-        passenger_ids = [row["passenger_id"] for row in fp_resp.data]
-        phone_numbers = []
-        for pid in passenger_ids:
-            p_resp = sb.table("passengers") \
-                .select("phone_number") \
-                .eq("id", pid) \
-                .limit(1) \
-                .execute()
-            if p_resp.data and p_resp.data[0].get("phone_number"):
-                phone_numbers.append(p_resp.data[0]["phone_number"])
-
-        return phone_numbers
-
-    except Exception as e:
-        print(f"  [{airport_code}] Error looking up subscribers for {flight_number}: {e}")
-        return []
+    return local_phones
 
 
 def _trigger_call(phone_number: str, airport_code: str, flight_number: str, changes: list[dict]):
-    """Call the Vercel backend /call/flight-change endpoint."""
+    """Trigger an outbound agent call via the main server's /flight-change-call endpoint."""
     import urllib.request
     import json
 
     payload = {
-        "phone_number": phone_number,
-        "airport_id": airport_code,
-        "flight_number": flight_number,
+        "phone": phone_number,
+        "flight": flight_number,
+        "airport": airport_code,
         "changes": [
             {
                 "field": _normalize_field(c["field"]),
@@ -119,18 +98,18 @@ def _trigger_call(phone_number: str, airport_code: str, flight_number: str, chan
 
     try:
         req = urllib.request.Request(
-            f"{BACKEND_URL}/call/flight-change",
+            f"{BACKEND_URL}/flight-change-call",
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read())
-            call_id = result.get("call_id", "ok")
-            print(f"  [{airport_code}] VAPI call triggered for {phone_number} on {flight_number}: {call_id}")
+            call_id = result.get("call_sid", result.get("status", "ok"))
+            print(f"  [{airport_code}] Outbound call triggered for {phone_number} on {flight_number}: {call_id}")
 
             # Add to changes log so it shows in the UI sidebar
-            change_summary = ", ".join(c["detail"] for c in changes)
+            change_summary = ", ".join(c.get("detail", f"{c['field']}: {c.get('old_value')} → {c.get('new_value')}") for c in changes)
             with state_lock:
                 if airport_code in airports_state:
                     airports_state[airport_code]["changes"].insert(0, {
@@ -143,7 +122,7 @@ def _trigger_call(phone_number: str, airport_code: str, flight_number: str, chan
                         "detail": f"📞 Auto-call to {phone_number} for {flight_number}: {change_summary}",
                     })
     except Exception as e:
-        print(f"  [{airport_code}] VAPI call failed for {phone_number} on {flight_number}: {e}")
+        print(f"  [{airport_code}] Outbound call failed for {phone_number} on {flight_number}: {e}")
         # Log the failure in the changes feed too
         with state_lock:
             if airport_code in airports_state:

@@ -91,6 +91,7 @@ def scrape_once(airport_code: str) -> None:
         for fn in all_departed:
             if fn in st["tracked"]:
                 st["tracked"].remove(fn)
+                st.get("subscribers", {}).pop(fn, None)
                 print(f"  [{airport_code}] {fn} departed — unpinned")
 
     for fn in all_departed:

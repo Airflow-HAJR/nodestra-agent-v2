@@ -1,6 +1,7 @@
 import json
 from typing import Annotated, List, Optional
 
+import httpx
 from langchain.tools import tool
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId
@@ -9,7 +10,7 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent.analytics import hash_user_id, upsert_user_memory
-from agent.config import DEFAULT_AIRPORT
+from agent.config import DEFAULT_AIRPORT, GATEGETTER_URL
 from agent.db import load_map_levels
 from agent.map_engine import (
     dijkstra_multilevel,
@@ -309,6 +310,53 @@ def set_flight_number(
 
 
 # ---------------------------------------------------------------------------
+# Direct flight status lookup (fast path — bypasses vector search)
+# ---------------------------------------------------------------------------
+
+class GetFlightStatusInput(BaseModel):
+    flight_number: str = Field(description="Exact flight number, e.g. '5X 7849' or 'UA2345'")
+    airport_id: str = Field(default=DEFAULT_AIRPORT)
+
+
+@tool(args_schema=GetFlightStatusInput)
+def get_flight_status(flight_number: str, airport_id: str = DEFAULT_AIRPORT) -> str:
+    """Get real-time gate, departure time, and status for a specific flight number.
+    Use this whenever you have an exact flight number — it queries the live departure
+    board directly and is much faster than search_flight_info."""
+    print("[thinking]")
+    needle = flight_number.upper().replace(" ", "")
+    try:
+        resp = httpx.get(f"{GATEGETTER_URL}/api/data?airport={airport_id}", timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        return f"Could not reach flight data service: {e}"
+
+    flights = resp.json().get("flights", [])
+    match = next(
+        (f for f in flights if (f.get("flight_number") or "").upper().replace(" ", "") == needle),
+        None,
+    )
+    if not match:
+        return f"Flight {flight_number.upper()} not found on the {airport_id} departure board."
+
+    dest_city = match.get("destination_city", "")
+    dest_iata = match.get("destination_iata", "")
+    destination = f"{dest_city} ({dest_iata})" if dest_iata else dest_city
+    departs = match.get("actual_time") or match.get("scheduled_time", "TBD")
+    gate_info = f"{match.get('terminal', '')} {match.get('gate', '')}".strip()
+    status = match.get("status", "Unknown")
+
+    parts = [
+        f"Flight {match.get('flight_number')} ({match.get('airline', '')}) to {destination}",
+        f"Departs {departs}",
+    ]
+    if gate_info:
+        parts.append(gate_info)
+    parts.append(f"Status: {status}")
+    return ". ".join(parts) + "."
+
+
+# ---------------------------------------------------------------------------
 # Call end tool
 # ---------------------------------------------------------------------------
 
@@ -485,6 +533,7 @@ TOOLS = [
     find_nearest,
     set_nav_state,
     set_flight_number,
+    # get_flight_status,  # enable when GateGetter server is running
     end_call,
     update_user_memory,
     recall_user_memories,

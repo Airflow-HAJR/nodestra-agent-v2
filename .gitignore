@@ -14,3 +14,6 @@ wheels/
 .env.*
 !.env.example
 .claude
+
+# ChromaDB vector store (local, regenerated on first run)
+.chroma_db/

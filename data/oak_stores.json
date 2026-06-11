@@ -1,0 +1,167 @@
+[
+  {
+    "name": "Peet's Coffee",
+    "category": "Coffee & Tea",
+    "terminal": "T1",
+    "gate_area": "Near Gate 7",
+    "hours": "4:00 AM - 10:00 PM",
+    "description": "Oakland's hometown coffee roaster. Full espresso menu, pastries, and grab-and-go breakfast items. All syrups and non-dairy milks available. Oat milk, almond milk, and soy milk options. Vegetarian and vegan friendly.",
+    "dietary": "Vegetarian, vegan options, dairy-free milk alternatives available. No halal certification.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points here (dining category). Chase Sapphire Reserve earns 3x points. Chase Sapphire Preferred earns 3x points. Capital One Venture earns 2x miles. No dedicated loyalty program — order via app for faster pickup.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Starbucks",
+    "category": "Coffee & Tea",
+    "terminal": "T2",
+    "gate_area": "Near Gate 22",
+    "hours": "4:30 AM - 9:30 PM",
+    "description": "Full Starbucks menu including hot and iced espresso drinks, Frappuccinos, teas, and packaged snacks. Oat milk, coconut milk, almond milk, and soy milk available. Vegetarian and vegan items clearly marked on menu.",
+    "dietary": "Vegetarian, vegan options available. Dairy-free milk alternatives. No halal certification.",
+    "perks": "Starbucks Rewards members earn stars — bring or use the app to collect. Amex Gold Card earns 4x Membership Rewards points (dining). Chase Sapphire Reserve earns 3x points on dining. Amex Platinum cardholders: counts toward the $200 airline incidental credit if charged to your airline account.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay, Starbucks App"
+  },
+  {
+    "name": "In-N-Out Burger",
+    "category": "Fast Food",
+    "terminal": "T1",
+    "gate_area": "Near Gate 11",
+    "hours": "6:00 AM - 11:00 PM",
+    "description": "West Coast favorite — fresh-never-frozen burgers, hand-cut fries, and real ice cream shakes. Secret menu available. Grilled cheese and veggie burger options for non-meat eaters. No pork on the menu.",
+    "dietary": "Vegetarian option: grilled cheese or veggie burger (no meat patty). NOT halal certified — beef patties are not halal. Gluten-free option: protein-style burger (lettuce wrap instead of bun). No dedicated vegan option (buns and shakes contain dairy/eggs).",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points (dining category). Chase Sapphire Reserve earns 3x points. No brand loyalty program.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Vino Volo",
+    "category": "Bar & Wine",
+    "terminal": "T2",
+    "gate_area": "Near Gate 24",
+    "hours": "7:00 AM - 9:00 PM",
+    "description": "Upscale wine bar with flights, full glasses, and cheese and charcuterie boards. California-forward wine list with Napa, Sonoma, and Central Coast pours. Full bar with cocktails and local craft beers.",
+    "dietary": "Vegetarian-friendly options available (cheese plates, salads). NOT suitable for halal — charcuterie contains pork. Gluten-free options available on request.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points (dining). Chase Sapphire Reserve earns 3x points on dining. Amex Platinum cardholders: dining credit eligible at select locations — check your benefits. Capital One Venture earns 2x miles on all purchases.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay"
+  },
+  {
+    "name": "Pluto's",
+    "category": "Casual Dining",
+    "terminal": "T1",
+    "gate_area": "Near Gate 9",
+    "hours": "6:00 AM - 10:00 PM",
+    "description": "Bay Area fast-casual staple. Build-your-own salads, rotisserie chicken, and warm sandwiches. Great for a quick sit-down meal. Large portions, fresh ingredients. Popular with families.",
+    "dietary": "Vegetarian and vegan options clearly labeled. Gluten-free salad bases available. NOT halal certified.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points (dining). Chase Sapphire Reserve earns 3x points. Chase Sapphire Preferred earns 3x on dining. Capital One Venture earns 2x miles.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "OAK News & Gifts",
+    "category": "Newsstand & Convenience",
+    "terminal": "T1",
+    "gate_area": "Near Gate 5",
+    "hours": "5:00 AM - 11:00 PM",
+    "description": "Magazines, newspapers, bestselling books, Oakland souvenirs, travel essentials, snacks, and bottled water. Pre-packaged halal-certified snacks available (Kind bars, nuts, certain packaged items).",
+    "dietary": "Pre-packaged snacks only — some halal-certified packaged goods stocked. No fresh food.",
+    "perks": "Amex Platinum cardholders: purchases here do not count toward airline incidental credits. No specific card rewards program. Capital One Venture earns 2x miles on all purchases.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay, Cash"
+  },
+  {
+    "name": "Hudson Booksellers",
+    "category": "Books & Media",
+    "terminal": "T2",
+    "gate_area": "Near Gate 23",
+    "hours": "5:30 AM - 9:30 PM",
+    "description": "Full-service bookstore with bestsellers, travel guides, children's books, magazines, and a curated local authors section. Also stocks Kindle accessories and headphones.",
+    "dietary": "No food sold here.",
+    "perks": "Amex Gold and Platinum earn standard 1x Membership Rewards points (not a dining or travel category). Capital One Venture earns 2x miles. Hudson News loyalty program available — ask at register for a rewards card.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Wildfin American Grill",
+    "category": "Sit-Down Restaurant",
+    "terminal": "T2",
+    "gate_area": "Near Gate 22",
+    "hours": "6:30 AM - 9:00 PM",
+    "description": "Pacific Northwest-inspired seafood and grill. Clam chowder, grilled salmon, salads, and craft beers on tap. Full bar. Seafood is sustainably sourced. Breakfast menu available until 10:30 AM.",
+    "dietary": "Gluten-free options available — ask your server. NOT halal certified. Vegetarian options available (salads, pasta). Shellfish allergy: cross-contamination risk, notify staff.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points (dining — one of the best earns at the airport). Chase Sapphire Reserve earns 3x points on dining. Amex Platinum $120 dining credit may apply here — verify with your card. Capital One Venture earns 2x miles.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Oakland Pharmacy & Travel",
+    "category": "Pharmacy & Health",
+    "terminal": "T1",
+    "gate_area": "Near Gate 3",
+    "hours": "5:00 AM - 11:00 PM",
+    "description": "Over-the-counter medications, travel health essentials, sunscreen, compression socks, ear plugs, eye drops, and personal care items. Halal-certified personal care products (unscented, alcohol-free options) available on request.",
+    "dietary": "N/A — not a food vendor.",
+    "perks": "HSA/FSA cards accepted for eligible health items. Amex and Visa earn standard points — no bonus category. Capital One Venture earns 2x miles on all purchases.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay, HSA/FSA cards, Cash"
+  },
+  {
+    "name": "Tech on the Go",
+    "category": "Electronics & Accessories",
+    "terminal": "T2",
+    "gate_area": "Near Gate 25",
+    "hours": "6:00 AM - 9:00 PM",
+    "description": "Phone chargers, cables, headphones, travel adapters, and portable battery packs. iPhone and Android accessories stocked. Beats, JBL, and Anker brands available.",
+    "dietary": "N/A — not a food vendor.",
+    "perks": "Amex Platinum cardholders: no specific credit but earns 1x points. Capital One Venture earns 2x miles. Chase Freedom Unlimited earns 1.5x on all purchases. No brand loyalty program.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Recharge Lounge",
+    "category": "Charging & Seating",
+    "terminal": "T1",
+    "gate_area": "Near Gate 13",
+    "hours": "Open 24 hours",
+    "description": "Complimentary charging stations with AC outlets and USB-A/C ports at every seat. Free airport WiFi. Quiet zone — no phone calls. Open to all passengers regardless of airline or ticket class.",
+    "dietary": "No food or beverages sold. Outside food and drinks welcome.",
+    "perks": "Completely free — no purchase or card required. Separate from paid airline lounges. Priority Pass, Amex Centurion, and Chase lounge access do NOT apply here — this is a public amenity.",
+    "accepts": "Free - no purchase required"
+  },
+  {
+    "name": "Bay Burrito Co.",
+    "category": "Fast Casual Mexican",
+    "terminal": "T1",
+    "gate_area": "Near Gate 16",
+    "hours": "6:00 AM - 10:00 PM",
+    "description": "Mission-style burritos, tacos, and bowls made fresh to order. All meats are halal-certified. Vegetarian and vegan options clearly labeled. Chips and fresh guacamole. No pork on the menu.",
+    "dietary": "HALAL certified — all meats (chicken, beef, lamb) are halal. Vegetarian and vegan options available. Gluten-free bowls available (no tortilla). Dairy-free: skip sour cream and cheese.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points (dining). Chase Sapphire Reserve earns 3x points. Chase Sapphire Preferred earns 3x on dining. Muslim-friendly: fully halal menu with no pork products anywhere on the menu.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "The Napa Valley Grille",
+    "category": "Sit-Down Restaurant",
+    "terminal": "T1",
+    "gate_area": "Near Gate 8",
+    "hours": "7:00 AM - 9:30 PM",
+    "description": "California wine country cuisine. Farm-to-table salads, wood-fired flatbreads, and a curated list of Napa and Sonoma wines. Full breakfast, lunch, and dinner menus. Seasonal menu changes quarterly.",
+    "dietary": "Vegetarian and vegan options available on every menu. Gluten-free flatbread crust available. NOT halal certified. Nut allergy: notify staff. Dairy-free options available.",
+    "perks": "Amex Gold Card earns 4x Membership Rewards points — excellent for high earn rates. Chase Sapphire Reserve earns 3x points on dining. Amex Platinum: $120 Uber Cash dining credit does NOT apply here (not a partner), but Global Dining Access by Resy may offer priority reservations. Capital One Savor Card earns 4% cash back at restaurants.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Jamba Juice",
+    "category": "Smoothies & Juice",
+    "terminal": "T2",
+    "gate_area": "Near Gate 23",
+    "hours": "5:30 AM - 9:00 PM",
+    "description": "Fresh-blended smoothies, acai bowls, and fruit juices. Protein boosts, collagen, and wheatgrass shots available. Many items are naturally dairy-free and vegan.",
+    "dietary": "Vegan and vegetarian friendly. Most smoothies are dairy-free (no milk base). Gluten-free options available. Halal: no meat products — fruit-based only, safe for halal diets. No pork-derived gelatin used.",
+    "perks": "Jamba Rewards loyalty program — earn points per dollar, redeem for free items. Amex Gold Card earns 4x Membership Rewards points (dining). Chase Sapphire Reserve earns 3x points. Amex Everyday Card earns 2x at US supermarkets but standard 1x here.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay"
+  },
+  {
+    "name": "Left Coast Tees",
+    "category": "Apparel & Souvenirs",
+    "terminal": "T2",
+    "gate_area": "Near Gate 22",
+    "hours": "6:00 AM - 9:00 PM",
+    "description": "Oakland and Bay Area branded apparel, hats, magnets, and keychains. Great last-minute gifts. Kids' sizes available. Oakland A's and Warriors licensed merchandise.",
+    "dietary": "N/A — not a food vendor.",
+    "perks": "No loyalty program. Amex earns standard 1x points (not a bonus category). Capital One Venture earns 2x miles on all purchases. Chase Freedom Flex earns 1x — no bonus here.",
+    "accepts": "Visa, Mastercard, Amex, Apple Pay, Google Pay, Cash"
+  }
+]

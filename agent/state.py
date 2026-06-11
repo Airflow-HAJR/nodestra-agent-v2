@@ -16,3 +16,4 @@ class State(TypedDict):
     commerce_context: Optional[str]
     active_intents: Optional[List[str]]
     user_profile: Optional[dict]  # profile_facts loaded from user_memory at session start
+    suggested_location: Optional[dict]  # {id, name} from memory — not yet confirmed by user

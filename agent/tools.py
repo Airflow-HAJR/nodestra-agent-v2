@@ -440,6 +440,43 @@ def search_user_memories(
     return search_memories(user_id, query)
 
 
+# ---------------------------------------------------------------------------
+# Flight change tracking tool
+# ---------------------------------------------------------------------------
+
+class TrackFlightInput(BaseModel):
+    flight_number: str = Field(description="Flight number to track, e.g. 'UA 123' or 'SW 891'")
+    phone_number: Optional[str] = Field(
+        default=None,
+        description="Phone number to call when the gate, status, or time changes. Defaults to the caller's current number.",
+    )
+    airport: str = Field(default=DEFAULT_AIRPORT, description="Airport IATA code, e.g. 'OAK'")
+
+
+@tool(args_schema=TrackFlightInput)
+def track_flight_changes(
+    flight_number: str,
+    phone_number: Optional[str] = None,
+    airport: str = DEFAULT_AIRPORT,
+    state: Annotated[dict, InjectedState] = {},
+) -> str:
+    """Register a flight for tracking and call the given phone number if the gate,
+    status, or departure time changes. Confirm the flight number with the user before
+    calling this. If no phone number is provided, the caller's current number is used."""
+    from agent.flight_tracker import subscribe
+
+    flight = flight_number.strip().upper().replace(" ", "")
+    phone = phone_number or (state.get("user_id") if state else None)
+    if not phone:
+        return "I need a phone number to call when the flight changes. Which number should I use?"
+
+    subscribe(airport.upper(), flight, phone)
+    return (
+        f"Done — I'm now tracking flight {flight}. "
+        f"I'll call {phone} if the gate, status, or departure time changes."
+    )
+
+
 TOOLS = [
     find_poi,
     get_route,
@@ -454,4 +491,5 @@ TOOLS = [
     search_flight_info,
     search_store_info,
     search_user_memories,
+    track_flight_changes,
 ]

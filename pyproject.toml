@@ -19,5 +19,5 @@ dependencies = [
     "twilio>=9.0.0",
     "elevenlabs>=1.0.0",
     "deepgram-sdk>=7.2.0",
-    "chromadb>=0.5",
+    "openai>=1.6.1",
 ]

@@ -7,6 +7,7 @@ and add an entry below. The slug is the path segment between
 """
 
 AIRPORT_SLUGS = {
+    "OAK": "metropolitan-oakland-intl-oak",
     "SFO": "san-francisco-intl-sfo",
     "SJC": "san-jose-mineta-intl-sjc",
     "LAX": "los-angeles-intl-lax",

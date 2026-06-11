@@ -4,17 +4,18 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Iterator, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import BaseModel as _PydanticBase
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.config import MEMORY_ENABLED
 from agent.llm import build_llm
-from agent.memory import get_last_flight, get_last_location_with_name
+from agent.memory import get_last_flight, get_last_location_with_name, get_session_metadata, search_memories
 from agent.prompts import build_system_prompt
 from agent.state import State
-from agent.timing import add_llm, add_supermemory, add_tool
+from agent.timing import add_llm, add_memory, add_tool
 from agent.tools import TOOLS
 from agent.logger import log_event
 
@@ -212,127 +213,95 @@ def _repair_node(state: State):
 
 # ================= intent detection & prefetch =================
 
-# Per-intent keyword sets for intents that benefit from a Supermemory personalization prefetch.
-_INTENT_KEYWORDS: dict[str, set[str]] = {
-    "navigate": {
-        "gate", "terminal", "get to", "how do i get", "directions", "navigate",
-        "take me", "route to", "way to", "walk to", "find my way", "where is",
-        "how far", "which way", "i need to go", "need to get to",
-    },
-    "food_drinks": {
-        "restaurant", "cafe", "coffee", "food", "eat", "hungry", "drink", "bar",
-        "snack", "lunch", "dinner", "breakfast", "meal", "sandwich", "pizza",
-        "sushi", "burger", "salad", "bakery", "juice", "smoothie", "beer",
-        "wine", "cocktail", "market", "kiosk", "boba", "tea", "ramen", "tacos",
-        "search_store_info",
-    },
-    "shopping": {
-        "shop", "store", "duty-free", "dutyfree", "newsstand", "buy", "purchase",
-        "souvenir", "gift", "retail", "boutique", "pharmacy", "drugstore",
-        "bookstore", "electronics", "sunglasses", "clothes", "fashion", "perfume",
-        "search_store_info",
-    },
-    "lounge_access": {
-        "lounge", "priority pass", "dragon pass", "club", "amex lounge",
-        "chase lounge", "centurion", "admirals club", "united club", "sky club",
-        "alaska lounge", "first class lounge", "business lounge",
-    },
-    "payment": {
-        "amex", "american express", "visa", "mastercard", "chase sapphire",
-        "apple pay", "google pay", "capital one", "card", "cashback", "rewards",
-        "miles", "points", "accept", "payment", "tap to pay",
-    },
-}
+# Intents that trigger a memory prefetch when detected
+_PREFETCH_INTENTS = {"navigate", "food_drinks", "shopping", "lounge_access", "payment"}
 
-# Intents detected purely from message keywords (no prefetch node needed for these).
-_KEYWORD_ONLY_INTENTS: dict[str, set[str]] = {
-    "flight_info": {
-        "flight", "gate", "boarding", "delay", "depart", "arrival", "connection",
-        "layover", "terminal", "on time", "cancelled", "status",
-        "search_flight_info",
-    },
-    "airport_infrastructure": {
-        "tsa", "security", "customs", "immigration", "precheck", "clear",
-        "global entry", "liquids", "checkpoint", "screening", "id", "passport",
-        "carry-on", "prohibited",
-    },
-    "ground_transport": {
-        "bart", "taxi", "uber", "lyft", "rideshare", "rental car", "shuttle",
-        "parking", "bus", "train", "transit", "pickup", "dropoff", "hotel",
-    },
-    "baggage": {
-        "baggage", "luggage", "suitcase", "bag claim", "carousel", "oversized",
-        "lost bag", "storage", "locker", "checked bag",
-    },
-    "accessibility": {
-        "wheelchair", "elevator", "accessible", "disability", "mobility",
-        "hearing", "visual", "blind", "deaf", "assistance", "ramp",
-    },
-    "wellness": {
-        "spa", "massage", "meditation", "quiet", "chapel", "prayer",
-        "nursing", "lactation", "mother", "pet relief", "yoga", "relax",
-    },
-    "charging_connectivity": {
-        "charge", "charging", "outlet", "wifi", "wi-fi", "internet",
-        "power", "usb", "plug", "business center", "laptop",
-    },
-    "family_services": {
-        "family", "stroller", "kid", "child", "children", "baby", "toddler",
-        "play area", "family restroom",
-    },
-    "tourism": {
-        "art", "exhibit", "museum", "mural", "installation", "architecture",
-        "history", "interesting", "explore", "sightseeing", "display",
-    },
-}
+_INTENT_SYSTEM = """\
+You are an intent classifier for an airport voice assistant.
+
+Classify the intent of the LAST USER MESSAGE only. Use prior conversation only to resolve ambiguous references \
+(e.g. "it", "there", "that place", "yeah let's do it") — do not re-classify intents that were already handled \
+in earlier turns.
+
+Intents:
+- navigate: user wants to go somewhere or get directions — includes confirmations like "yeah let's do it" \
+or "take me there" when the prior assistant turn offered navigation
+- food_drinks: user is actively requesting food or drink recommendations (not already in progress)
+- shopping: user wants to buy something or find a specific shop
+- lounge_access: user is asking about airport lounges
+- payment: user is asking about payment methods, cards, or rewards
+- flight_info: user is asking about flight status, gate, boarding, or delays
+- accessibility: user has mobility needs or is asking about wheelchair/elevator access
+- ground_transport: user is asking about taxis, rideshare, BART, or airport shuttles
+- baggage: user is asking about luggage or bag claim
+- wellness: user is looking for a spa, quiet room, chapel, or relaxation space
+- charging_connectivity: user needs device charging, wifi, or a power outlet
+- family_services: user needs family restrooms, play area, or stroller info
+
+Return {"intents": []} for simple acknowledgements with no new request ("okay thanks", "got it", "sounds good").
+
+Respond with JSON only.\
+"""
+
+class _IntentResult(_PydanticBase):
+    intents: list[str]
+
+_intent_classifier = None
 
 
-def _detect_intents(text: str) -> list[str]:
-    """Return all intents whose keywords appear in text, prefetch intents first."""
-    lower = text.lower()
-    found: list[str] = []
-    for intent, keywords in _INTENT_KEYWORDS.items():
-        if any(kw in lower for kw in keywords):
-            found.append(intent)
-    for intent, keywords in _KEYWORD_ONLY_INTENTS.items():
-        if any(kw in lower for kw in keywords):
-            found.append(intent)
-    return found
+def _get_intent_classifier():
+    global _intent_classifier
+    if _intent_classifier is None:
+        _intent_classifier = build_llm().with_structured_output(_IntentResult, method="json_mode")
+    return _intent_classifier
+
+
+def _detect_intents(messages: list) -> list[str]:
+    """Use the LLM to classify the user's intent given recent conversation context."""
+    # Build a compact context string from the last 4 messages so short replies like
+    # "yeah let's do it" are understood relative to what was just discussed.
+    context_lines: list[str] = []
+    for msg in messages[-4:]:
+        if isinstance(msg, HumanMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            context_lines.append(f"User: {content}")
+        elif isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            context_lines.append(f"Assistant: {content[:200]}")
+    context = "\n".join(context_lines)
+    try:
+        result = _get_intent_classifier().invoke([
+            SystemMessage(content=_INTENT_SYSTEM),
+            HumanMessage(content=context),
+        ])
+        return result.intents if result else []
+    except Exception as e:
+        print(f"[intent detection failed: {e}]")
+        return []
 
 
 def _prefetch_router(state: State) -> Literal["prefetch", "agent"]:
-    """Route to prefetch only when the message contains a prefetch-eligible intent."""
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
-            text = (msg.content if isinstance(msg.content, str) else str(msg.content)).lower()
-            if any(any(kw in text for kw in kws) for kws in _INTENT_KEYWORDS.values()):
-                return "prefetch"
-            return "agent"
-    return "agent"
+    """Always route to prefetch — LLM detection inside prefetch decides what (if anything) to fetch."""
+    return "prefetch"
 
 
 def _prefetch_node(state: State) -> dict:
     """Pre-fetch personalization data for intents where it meaningfully affects the response.
 
-    Fetches Supermemory user preferences for navigate, food_drinks, shopping, lounge_access,
-    and payment intents. Sets specific detected intent names in active_intents so PHASE_FOCUS
-    renders the right instructions.
+    Queries user memory for navigate, food_drinks, shopping, lounge_access, and payment intents.
+    Sets specific detected intent names in active_intents so PHASE_FOCUS renders the right instructions.
     """
-    from agent.memory import search_memories
-
-    # Detect which specific intents are active from the latest message
-    detected: list[str] = []
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, HumanMessage):
-            text = msg.content if isinstance(msg.content, str) else str(msg.content)
-            detected = _detect_intents(text)
-            break
+    # Detect intents from recent conversation context (not just the last message)
+    detected = _detect_intents(state["messages"])
 
     # Merge with any intents already in state (e.g. navigate set by set_nav_state)
     existing = list(state.get("active_intents") or [])
     merged_intents = list({*existing, *detected})
 
+    print(f"[intents detected: {detected or 'none'}]")
+
     if not MEMORY_ENABLED:
+        print("[memory disabled — skipping preference prefetch]")
         return {"commerce_context": None, "active_intents": merged_intents}
 
     t0 = time.time()
@@ -340,28 +309,41 @@ def _prefetch_node(state: State) -> dict:
     prefs: str | None = None
     user_id = state.get("user_id")
 
-    active_prefetch = [i for i in detected if i in _INTENT_KEYWORDS]
+    active_prefetch = [i for i in detected if i in _PREFETCH_INTENTS]
     needs_navigate = "navigate" in active_prefetch
     needs_food = "food_drinks" in active_prefetch
     needs_lounge = "lounge_access" in active_prefetch
-    needs_payment = "payment" in active_prefetch or "shopping" in active_prefetch
+    # Co-occurrence rules: food/shopping always pull payment; navigate always pulls accessibility
+    needs_payment = "payment" in active_prefetch or "shopping" in active_prefetch or needs_food
+    needs_accessibility = needs_navigate  # navigate always checks mobility/accessibility prefs
 
-    # Supermemory: fetch all relevant preference types in a single query
-    if user_id and active_prefetch:
-        query_parts = []
-        if needs_navigate:
-            query_parts.append("accessibility needs wheelchair elevator route preferences mobility")
-        if needs_food:
-            query_parts.append("food preferences dietary restrictions cuisine")
-        if needs_lounge:
-            query_parts.append("lounge access priority pass credit card lounge membership")
-        if needs_payment:
-            query_parts.append("payment cards Apple Pay loyalty programs")
+    effective_intents = list(active_prefetch)
+    if needs_payment and "payment" not in effective_intents:
+        effective_intents.append("payment")
+    if needs_accessibility and "accessibility" not in effective_intents:
+        effective_intents.append("accessibility")
+    print(f"[prefetch intents: {effective_intents}]")
 
-        print("[thinking with supermemory]")
+    # Map each effective intent to a short, clean memory query term
+    _INTENT_QUERY: dict[str, str] = {
+        "navigate":     "route mobility accessibility",
+        "food_drinks":  "food diet cuisine",
+        "shopping":     "shopping preference",
+        "lounge_access":"lounge membership",
+        "payment":      "payment card loyalty",
+        "accessibility":"mobility wheelchair elevator",
+    }
+
+    if user_id and effective_intents:
+        query_terms = " ".join(
+            _INTENT_QUERY[i] for i in effective_intents if i in _INTENT_QUERY
+        )
+        query = query_terms
+        print(f"[memory query: {query!r}]")
         t1 = time.time()
-        prefs = search_memories(user_id, " ".join(query_parts))
-        add_supermemory(time.time() - t1)
+        prefs = search_memories(user_id, query)
+        add_memory(time.time() - t1)
+        print(f"[memory result: {prefs!r}]")
         if prefs and "no memories" not in prefs.lower():
             parts.append(f"USER_PREFERENCES:\n{prefs}")
 
@@ -378,6 +360,65 @@ def _prefetch_node(state: State) -> dict:
         "commerce_context": "\n\n".join(parts) if parts else None,
         "active_intents": merged_intents,
     }
+
+
+# ================= preference acknowledgment =================
+
+def _pref_ack_router(state: State) -> Literal["pref_ack", "agent"]:
+    """Route to pref_ack only on the first turn preferences are found; then let agent handle it."""
+    if state.get("pref_acked"):
+        return "agent"
+    commerce = state.get("commerce_context") or ""
+    if "USER_PREFERENCES:" in commerce:
+        return "pref_ack"
+    return "agent"
+
+
+def _pref_ack_node(state: State) -> dict:
+    """Use the LLM to generate a fun, natural preference-acknowledgment and ask the user to choose.
+
+    Skips the main agent this turn. On the next turn, the agent sees pref_acked=True and
+    routes straight to agent which calls search_store_info with the user's stated choice.
+    """
+    commerce = state.get("commerce_context") or ""
+    # Parse "key: value" lines out of the USER_PREFERENCES block
+    pref_lines: list[str] = []
+    in_block = False
+    for line in commerce.splitlines():
+        if line.strip() == "USER_PREFERENCES:":
+            in_block = True
+            continue
+        if in_block and line.strip():
+            pref_lines.append(line.strip())
+
+    if not pref_lines:
+        return {}
+
+    last_msg = ""
+    for m in reversed(state["messages"]):
+        if isinstance(m, HumanMessage):
+            last_msg = m.content if isinstance(m.content, str) else str(m.content)
+            break
+
+    # Pass the full key:value list so the LLM sees food AND payment preferences
+    prefs_block = "\n".join(pref_lines)
+
+    prompt = (
+        f"The user just said: \"{last_msg}\"\n\n"
+        f"Their stored preferences from past visits:\n{prefs_block}\n\n"
+        "In 1-2 casual spoken sentences: tell them you're pulling up their past preferences, "
+        "reference the most relevant ones for what they asked (cover both food AND payment if both are present), "
+        "then ask if they want to go with one of those or try something different. "
+        "Be natural and warm. No lists, no markdown."
+    )
+
+    t0 = time.time()
+    response = build_llm().invoke([SystemMessage(content=prompt)])
+    add_llm(time.time() - t0)
+
+    msg = response.content if isinstance(response.content, str) else str(response.content)
+    speak_early(msg)
+    return {"messages": [AIMessage(content=msg)], "pref_acked": True}
 
 
 # ================= subgraph builder =================
@@ -469,11 +510,16 @@ def _build_subgraph():
     builder.add_node("agent", _agent_node)
     builder.add_node("tools", _timed_tools)
     builder.add_node("repair", _repair_node)
+    builder.add_node("pref_ack", _pref_ack_node)
     builder.add_conditional_edges(
         START, _prefetch_router,
         {"prefetch": "prefetch", "agent": "agent"},
     )
-    builder.add_edge("prefetch", "agent")
+    builder.add_conditional_edges(
+        "prefetch", _pref_ack_router,
+        {"pref_ack": "pref_ack", "agent": "agent"},
+    )
+    builder.add_edge("pref_ack", END)
     builder.add_conditional_edges("agent", tools_condition)
     builder.add_conditional_edges(
         "tools", _check_tool_errors, {"repair": "repair", "agent": "agent"}
@@ -489,20 +535,46 @@ def _init_node(state: State) -> dict:
     user_id = state.get("user_id")
     if not user_id or not MEMORY_ENABLED:
         return {}
+    # Only run on the very first turn — user_profile persists in checkpoint after that
+    if state.get("user_profile"):
+        return {}
     result: dict = {}
+
+    t0 = time.time()
+    meta = get_session_metadata(user_id)
+    add_memory(time.time() - t0)
+
+    if meta:
+        result["user_profile"] = {
+            "visit_count": meta.get("visit_count"),
+            "last_flight": meta.get("last_flight"),
+            "last_location_name": meta.get("last_location_name"),
+            "last_seen": meta.get("last_seen"),
+        }
+        visit = meta.get("visit_count") or 0
+        last_loc = meta.get("last_location_name") or "unknown"
+        last_flight = meta.get("last_flight") or "unknown"
+        print(f"[session: visit #{visit}, last location: {last_loc}, last flight: {last_flight}]")
+
     if not state.get("current_location") and not state.get("suggested_location"):
-        t0 = time.time()
-        poi_id, poi_name = get_last_location_with_name(user_id)
-        add_supermemory(time.time() - t0)
+        poi_id = meta.get("last_location") if meta else None
+        poi_name = meta.get("last_location_name") if meta else None
+        if not poi_id:
+            t0 = time.time()
+            poi_id, poi_name = get_last_location_with_name(user_id)
+            add_memory(time.time() - t0)
         if poi_id:
-            # Don't set current_location directly — agent must confirm with user first.
             result["suggested_location"] = {"id": poi_id, "name": poi_name or poi_id}
+
     if not state.get("flight_number"):
-        t0 = time.time()
-        flight = get_last_flight(user_id)
-        add_supermemory(time.time() - t0)
+        flight = meta.get("last_flight") if meta else None
+        if not flight:
+            t0 = time.time()
+            flight = get_last_flight(user_id)
+            add_memory(time.time() - t0)
         if flight:
             result["flight_number"] = flight
+
     return result
 
 

@@ -35,9 +35,6 @@ SERVER_BASE_URL = (
     or (f"https://{_railway_domain}" if _railway_domain else "http://localhost:8000")
 )
 
-# Supermemory (persistent user personalization)
-SUPERMEMORY_API_KEY = os.environ.get("SUPERMEMORY_API_KEY", "")
-
 # Moss semantic search
 MOSS_PROJECT_ID = os.environ.get("MOSS_PROJECT_ID", "")
 MOSS_PROJECT_KEY = os.environ.get("MOSS_PROJECT_KEY", "")

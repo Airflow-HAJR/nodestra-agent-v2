@@ -17,3 +17,4 @@ class State(TypedDict):
     active_intents: Optional[List[str]]
     user_profile: Optional[dict]  # profile_facts loaded from user_memory at session start
     suggested_location: Optional[dict]  # {id, name} from memory — not yet confirmed by user
+    pref_acked: Optional[bool]  # True after _pref_ack_node fires; prevents re-firing on follow-up turns

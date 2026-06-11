@@ -3,11 +3,11 @@ import re
 
 from agent.analytics import _safe_data, hash_user_id, upsert_user_memory
 from agent.config import DEFAULT_AIRPORT
-from agent.db import is_network_error, mark_supabase_unreachable, supabase_ok, get_client as get_supabase
+from agent.db import is_network_error, mark_supabase_unreachable, supabase_ok, get_service_client as get_supabase
 
 logger = logging.getLogger(__name__)
 
-_RELEVANCE_THRESHOLD = 0.3
+_RELEVANCE_THRESHOLD = 0.15
 
 
 def _tokenize(text: str) -> list[str]:
@@ -166,6 +166,27 @@ def get_user_profile(user_id: str) -> dict:
         if is_network_error(exc):
             mark_supabase_unreachable()
         logger.exception("get_user_profile failed")
+        return {}
+
+
+def get_session_metadata(user_id: str) -> dict:
+    """Return visit_count, last_flight, last_location_name for session context (no preferences)."""
+    if not supabase_ok():
+        return {}
+    try:
+        result = (
+            get_supabase()
+            .table("user_memory")
+            .select("visit_count, last_flight, last_location_name, last_seen")
+            .eq("user_id_hash", hash_user_id(user_id))
+            .maybe_single()
+            .execute()
+        )
+        return _safe_data(result)
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
+        logger.exception("get_session_metadata failed")
         return {}
 
 

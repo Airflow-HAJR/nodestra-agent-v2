@@ -5,7 +5,7 @@ Call-level accumulator persists across turns; reset with call_reset()."""
 _stats: dict = {
     "llm_ms": 0.0, "llm_calls": 0,
     "tool_ms": 0.0, "tool_calls": 0,
-    "supermemory_ms": 0.0, "supermemory_calls": 0,
+    "memory_ms": 0.0, "memory_calls": 0,
     "moss_ms": 0.0, "moss_calls": 0,
     "tts_ms": 0.0, "tts_calls": 0,
 }
@@ -31,7 +31,7 @@ def reset():
     _stats.update({
         "llm_ms": 0.0, "llm_calls": 0,
         "tool_ms": 0.0, "tool_calls": 0,
-        "supermemory_ms": 0.0, "supermemory_calls": 0,
+        "memory_ms": 0.0, "memory_calls": 0,
         "moss_ms": 0.0, "moss_calls": 0,
         "tts_ms": 0.0, "tts_calls": 0,
     })
@@ -85,9 +85,9 @@ def add_tool(seconds: float, count: int = 1):
     _stats["tool_calls"] += count
 
 
-def add_supermemory(seconds: float):
-    _stats["supermemory_ms"] += seconds * 1000
-    _stats["supermemory_calls"] += 1
+def add_memory(seconds: float):
+    _stats["memory_ms"] += seconds * 1000
+    _stats["memory_calls"] += 1
 
 
 def add_moss(seconds: float):
@@ -108,15 +108,15 @@ def summary(total_seconds: float) -> str:
     total_ms = total_seconds * 1000
     llm_ms   = _stats["llm_ms"]
     tool_ms  = _stats["tool_ms"]
-    sm_ms    = _stats["supermemory_ms"]
+    mem_ms   = _stats["memory_ms"]
     moss_ms  = _stats["moss_ms"]
     tts_ms   = _stats["tts_ms"]
-    other_ms = total_ms - llm_ms - tool_ms - sm_ms - moss_ms - tts_ms
+    other_ms = total_ms - llm_ms - tool_ms - mem_ms - moss_ms - tts_ms
     return (
         f"LATENCY  total={total_ms:.0f}ms"
         f"  llm={_fmt(llm_ms, _stats['llm_calls'])}"
         f"  tools={_fmt(tool_ms, _stats['tool_calls'])}"
-        f"  supermemory={_fmt(sm_ms, _stats['supermemory_calls'])}"
+        f"  memory={_fmt(mem_ms, _stats['memory_calls'])}"
         f"  moss={_fmt(moss_ms, _stats['moss_calls'])}"
         f"  tts={_fmt(tts_ms, _stats['tts_calls'])}"
         f"  other={other_ms:.0f}ms"

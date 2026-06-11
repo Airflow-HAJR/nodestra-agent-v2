@@ -1079,7 +1079,10 @@ async def _flight_watch_loop():
 
 @app.on_event("startup")
 async def _startup():
-    asyncio.create_task(_flight_watch_loop())
+    if os.environ.get("FLIGHT_TRACKER_ENABLED", "false").lower() == "true":
+        asyncio.create_task(_flight_watch_loop())
+    else:
+        logger.info("[FlightWatch] Disabled — set FLIGHT_TRACKER_ENABLED=true to enable")
 
 
 if __name__ == "__main__":

@@ -993,27 +993,33 @@ async def map_refresh(body: MapRefreshRequest):
 
 # ── Browser WebSocket (React voice UI) ───────────────────────────────────────
 
+def _deepgram_stt(audio_bytes: bytes, fmt: str, lang: str) -> str:
+    """Transcribe browser audio using Deepgram prerecorded API."""
+    from deepgram import DeepgramClient, PrerecordedOptions
+    mime = {"webm": "audio/webm", "ogg": "audio/ogg", "mp4": "audio/mp4"}.get(fmt, "audio/webm")
+    dg = DeepgramClient(api_key=DEEPGRAM_API_KEY)
+    response = dg.listen.prerecorded.v("1").transcribe_file(
+        {"buffer": audio_bytes, "mimetype": mime},
+        PrerecordedOptions(model="nova-2", language=lang[:2] if lang else "en"),
+    )
+    return response.results.channels[0].alternatives[0].transcript.strip()
+
+
+def _elevenlabs_mp3(text: str) -> bytes:
+    """Generate MP3 audio from ElevenLabs."""
+    return b"".join(
+        _eleven.text_to_speech.convert(
+            voice_id=ELEVENLABS_VOICE_ID,
+            text=text,
+            model_id="eleven_flash_v2_5",
+            output_format="mp3_44100_128",
+        )
+    )
+
+
 @app.websocket("/web/stream")
 async def web_stream(ws: WebSocket):
-    """
-    WebSocket endpoint for the React voice agent UI (nodestra-agent-ui).
-
-    Message protocol:
-      Client → Server:
-        { type: 'config', language: 'en', userId: '...' }
-        { type: 'audio', data: '<base64>', format: 'webm'|'ogg'|'mp4', language: 'en' }
-        { type: 'ping' }
-
-      Server → Client:
-        { type: 'transcript', role: 'user'|'agent', text: '...' }
-        { type: 'audio', data: '<base64 mp3>', format: 'mp3' }
-        { type: 'status', state: 'idle'|'thinking'|'speaking' }
-        { type: 'map_action', action: {...} }
-        { type: 'error', message: '...' }
-    """
-    import tempfile
-    import openai as _openai
-
+    """WebSocket endpoint for the React voice agent UI (nodestra-agent-ui)."""
     await ws.accept()
     loop = asyncio.get_running_loop()
     session_id = str(uuid.uuid4())
@@ -1029,20 +1035,6 @@ async def web_stream(ws: WebSocket):
             pass
 
     await _send({"type": "status", "state": "idle"})
-
-    def _stt(audio_bytes: bytes, fmt: str, lang: str) -> str:
-        ext = {"webm": "webm", "ogg": "ogg", "mp4": "mp4"}.get(fmt, "webm")
-        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
-            f.write(audio_bytes)
-            f.flush()
-            client = _openai.OpenAI()
-            with open(f.name, "rb") as af:
-                result = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=af,
-                    language=lang[:2] if lang else "en",
-                )
-        return result.text.strip()
 
     try:
         async for raw in ws.iter_text():
@@ -1075,9 +1067,11 @@ async def web_stream(ws: WebSocket):
 
             await _send({"type": "status", "state": "thinking"})
 
-            # STT
+            # STT — Deepgram prerecorded
             try:
-                transcript = await loop.run_in_executor(_executor, _stt, audio_bytes, fmt, lang)
+                transcript = await loop.run_in_executor(
+                    _executor, _deepgram_stt, audio_bytes, fmt, lang
+                )
             except Exception as e:
                 logger.error(f"Web STT failed [{session_id}]: {e}")
                 await _send({"type": "error", "message": "Could not transcribe audio."})
@@ -1091,7 +1085,7 @@ async def web_stream(ws: WebSocket):
             await _send({"type": "transcript", "role": "user", "text": transcript})
             log_event("turn_start", thread_id=session_id, transcript=transcript[:200])
 
-            # LangGraph with map + sentence callbacks
+            # LangGraph — same _graph_reply as Twilio path, with map callback added
             map_actions: list[dict] = []
             sentence_parts: list[str] = []
 
@@ -1117,7 +1111,7 @@ async def web_stream(ws: WebSocket):
 
             response_text = reply.get("text") or " ".join(sentence_parts)
 
-            # Emit map actions before the audio so the UI updates before speaking
+            # Send map actions before audio so the UI updates while the agent speaks
             for action in map_actions:
                 await _send({"type": "map_action", "action": action})
 
@@ -1126,31 +1120,19 @@ async def web_stream(ws: WebSocket):
 
             await _send({"type": "status", "state": "speaking"})
 
-            # TTS
-            try:
-                mp3_bytes = await loop.run_in_executor(_executor, _tts_mp3_url, response_text)
-                if mp3_bytes:
-                    # _tts_mp3_url returns a URL; fetch the actual bytes from the cache endpoint
-                    # Instead, use _tts_mulaw_iter to get audio and re-encode — or use ElevenLabs
-                    # mp3 directly via the eleven SDK below.
-                    pass
-                mp3_audio = b"".join(
-                    _eleven.text_to_speech.convert(
-                        voice_id=ELEVENLABS_VOICE_ID,
-                        text=response_text,
-                        model_id="eleven_flash_v2_5",
-                        output_format="mp3_44100_128",
+            # TTS — ElevenLabs MP3
+            if _eleven and ELEVENLABS_VOICE_ID and response_text:
+                try:
+                    mp3_audio = await loop.run_in_executor(
+                        _executor, _elevenlabs_mp3, response_text
                     )
-                ) if _eleven and ELEVENLABS_VOICE_ID else b""
-
-                if mp3_audio:
                     await _send({
                         "type": "audio",
                         "data": base64.b64encode(mp3_audio).decode(),
                         "format": "mp3",
                     })
-            except Exception as e:
-                logger.error(f"Web TTS failed [{session_id}]: {e}")
+                except Exception as e:
+                    logger.error(f"Web TTS failed [{session_id}]: {e}")
 
             await _send({"type": "status", "state": "idle"})
             log_event("turn_end", thread_id=session_id, response=response_text[:200])

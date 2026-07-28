@@ -20,6 +20,7 @@ from agent.map_engine import (
     search_pois,
 )
 from agent.memory import get_last_location, save_conversation, search_memories, update_flight, update_location
+from agent.map_tools import MAP_TOOLS
 
 
 # ---------------------------------------------------------------------------
@@ -541,4 +542,5 @@ TOOLS = [
     search_store_info,
     search_user_memories,
     track_flight_changes,
+    *MAP_TOOLS,
 ]

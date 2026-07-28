@@ -26,7 +26,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
-from agent.graph import bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
+from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
     CARTESIA_EMOTION,
@@ -989,6 +989,181 @@ async def map_refresh(body: MapRefreshRequest):
     except Exception as e:
         logger.error(f"Map refresh failed [{body.airport_id}]: {e}")
         raise HTTPException(status_code=502, detail=str(e))
+
+
+# ── Browser WebSocket (React voice UI) ───────────────────────────────────────
+
+@app.websocket("/web/stream")
+async def web_stream(ws: WebSocket):
+    """
+    WebSocket endpoint for the React voice agent UI (nodestra-agent-ui).
+
+    Message protocol:
+      Client → Server:
+        { type: 'config', language: 'en', userId: '...' }
+        { type: 'audio', data: '<base64>', format: 'webm'|'ogg'|'mp4', language: 'en' }
+        { type: 'ping' }
+
+      Server → Client:
+        { type: 'transcript', role: 'user'|'agent', text: '...' }
+        { type: 'audio', data: '<base64 mp3>', format: 'mp3' }
+        { type: 'status', state: 'idle'|'thinking'|'speaking' }
+        { type: 'map_action', action: {...} }
+        { type: 'error', message: '...' }
+    """
+    import tempfile
+    import openai as _openai
+
+    await ws.accept()
+    loop = asyncio.get_running_loop()
+    session_id = str(uuid.uuid4())
+    user_id: str | None = None
+    language = "en"
+
+    logger.info(f"Web stream connected: {session_id}")
+
+    async def _send(msg: dict) -> None:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
+
+    await _send({"type": "status", "state": "idle"})
+
+    def _stt(audio_bytes: bytes, fmt: str, lang: str) -> str:
+        ext = {"webm": "webm", "ogg": "ogg", "mp4": "mp4"}.get(fmt, "webm")
+        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
+            f.write(audio_bytes)
+            f.flush()
+            client = _openai.OpenAI()
+            with open(f.name, "rb") as af:
+                result = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=af,
+                    language=lang[:2] if lang else "en",
+                )
+        return result.text.strip()
+
+    try:
+        async for raw in ws.iter_text():
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+
+            msg_type = msg.get("type")
+
+            if msg_type == "ping":
+                await _send({"type": "status", "state": "idle"})
+                continue
+
+            if msg_type == "config":
+                language = msg.get("language", "en")
+                user_id = msg.get("userId") or None
+                continue
+
+            if msg_type != "audio":
+                continue
+
+            try:
+                audio_bytes = base64.b64decode(msg["data"])
+                fmt = msg.get("format", "webm")
+                lang = msg.get("language", language)
+            except Exception as e:
+                await _send({"type": "error", "message": f"Bad audio payload: {e}"})
+                continue
+
+            await _send({"type": "status", "state": "thinking"})
+
+            # STT
+            try:
+                transcript = await loop.run_in_executor(_executor, _stt, audio_bytes, fmt, lang)
+            except Exception as e:
+                logger.error(f"Web STT failed [{session_id}]: {e}")
+                await _send({"type": "error", "message": "Could not transcribe audio."})
+                await _send({"type": "status", "state": "idle"})
+                continue
+
+            if not transcript:
+                await _send({"type": "status", "state": "idle"})
+                continue
+
+            await _send({"type": "transcript", "role": "user", "text": transcript})
+            log_event("turn_start", thread_id=session_id, transcript=transcript[:200])
+
+            # LangGraph with map + sentence callbacks
+            map_actions: list[dict] = []
+            sentence_parts: list[str] = []
+
+            def map_cb(action: dict) -> None:
+                map_actions.append(action)
+
+            def sentence_cb(text_or_none: str | None) -> None:
+                if text_or_none is not None:
+                    sentence_parts.append(text_or_none)
+
+            try:
+                with bind_speak_early_callback(None):
+                    with bind_sentence_callback(sentence_cb):
+                        with bind_map_callback(map_cb):
+                            reply = await loop.run_in_executor(
+                                _executor, _graph_reply, transcript, session_id, user_id
+                            )
+            except Exception as e:
+                logger.error(f"Web graph error [{session_id}]: {e}", exc_info=True)
+                await _send({"type": "error", "message": "Something went wrong. Please try again."})
+                await _send({"type": "status", "state": "idle"})
+                continue
+
+            response_text = reply.get("text") or " ".join(sentence_parts)
+
+            # Emit map actions before the audio so the UI updates before speaking
+            for action in map_actions:
+                await _send({"type": "map_action", "action": action})
+
+            if response_text:
+                await _send({"type": "transcript", "role": "agent", "text": response_text})
+
+            await _send({"type": "status", "state": "speaking"})
+
+            # TTS
+            try:
+                mp3_bytes = await loop.run_in_executor(_executor, _tts_mp3_url, response_text)
+                if mp3_bytes:
+                    # _tts_mp3_url returns a URL; fetch the actual bytes from the cache endpoint
+                    # Instead, use _tts_mulaw_iter to get audio and re-encode — or use ElevenLabs
+                    # mp3 directly via the eleven SDK below.
+                    pass
+                mp3_audio = b"".join(
+                    _eleven.text_to_speech.convert(
+                        voice_id=ELEVENLABS_VOICE_ID,
+                        text=response_text,
+                        model_id="eleven_flash_v2_5",
+                        output_format="mp3_44100_128",
+                    )
+                ) if _eleven and ELEVENLABS_VOICE_ID else b""
+
+                if mp3_audio:
+                    await _send({
+                        "type": "audio",
+                        "data": base64.b64encode(mp3_audio).decode(),
+                        "format": "mp3",
+                    })
+            except Exception as e:
+                logger.error(f"Web TTS failed [{session_id}]: {e}")
+
+            await _send({"type": "status", "state": "idle"})
+            log_event("turn_end", thread_id=session_id, response=response_text[:200])
+
+            if reply.get("hangup"):
+                break
+
+    except WebSocketDisconnect:
+        logger.info(f"Web stream disconnected: {session_id}")
+    except Exception as e:
+        logger.error(f"Web stream error [{session_id}]: {e}", exc_info=True)
+    finally:
+        logger.info(f"Web stream closed: {session_id}")
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

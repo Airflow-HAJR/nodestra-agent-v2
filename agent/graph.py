@@ -47,8 +47,12 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Pulling up the airport map.",
         "Loading the map for you.",
     ],
-    "set_nav_state": [],   # silent — just a state update
-    "end_call": [],        # silent — just a state update
+    "set_nav_state": [],          # silent — just a state update
+    "end_call": [],               # silent — just a state update
+    "show_map_destination": [],   # silent — map update, no filler needed
+    "show_map_directions": [],    # silent — map update, no filler needed
+    "show_map_route": [],         # silent — map update, no filler needed
+    "clear_map": [],              # silent — map update, no filler needed
     "search_flight_info": [
         "Checking the departure board.",
         "Looking up that flight.",
@@ -119,6 +123,16 @@ def bind_sentence_callback(callback: Callable[[str | None], None] | None) -> Ite
         yield
     finally:
         _sentence_callback_var.reset(token)
+
+
+@contextmanager
+def bind_map_callback(callback: Callable[[dict], None] | None) -> Iterator[None]:
+    from agent.map_tools import _map_callback_var
+    token = _map_callback_var.set(callback)
+    try:
+        yield
+    finally:
+        _map_callback_var.reset(token)
 
 
 def reset_turn_state() -> None:

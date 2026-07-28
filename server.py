@@ -994,15 +994,22 @@ async def map_refresh(body: MapRefreshRequest):
 # ── Browser WebSocket (React voice UI) ───────────────────────────────────────
 
 def _deepgram_stt(audio_bytes: bytes, fmt: str, lang: str) -> str:
-    """Transcribe browser audio using Deepgram prerecorded API."""
-    from deepgram import DeepgramClient, PrerecordedOptions
+    """Transcribe browser audio using Deepgram prerecorded REST API (httpx, no SDK)."""
+    import httpx
     mime = {"webm": "audio/webm", "ogg": "audio/ogg", "mp4": "audio/mp4"}.get(fmt, "audio/webm")
-    dg = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-    response = dg.listen.prerecorded.v("1").transcribe_file(
-        {"buffer": audio_bytes, "mimetype": mime},
-        PrerecordedOptions(model="nova-2", language=lang[:2] if lang else "en"),
+    language = lang[:2] if lang else "en"
+    resp = httpx.post(
+        f"https://api.deepgram.com/v1/listen?model=nova-2&language={language}",
+        headers={
+            "Authorization": f"Token {DEEPGRAM_API_KEY}",
+            "Content-Type": mime,
+        },
+        content=audio_bytes,
+        timeout=30.0,
     )
-    return response.results.channels[0].alternatives[0].transcript.strip()
+    resp.raise_for_status()
+    data = resp.json()
+    return data["results"]["channels"][0]["alternatives"][0]["transcript"].strip()
 
 
 def _elevenlabs_mp3(text: str) -> bytes:
@@ -1052,6 +1059,21 @@ async def web_stream(ws: WebSocket):
             if msg_type == "config":
                 language = msg.get("language", "en")
                 user_id = msg.get("userId") or None
+                # Send initial welcome greeting
+                welcome = "Welcome to Oakland International Airport. How can I help you today?"
+                await _send({"type": "transcript", "role": "agent", "text": welcome})
+                await _send({"type": "status", "state": "speaking"})
+                if _eleven and ELEVENLABS_VOICE_ID:
+                    try:
+                        mp3_audio = await loop.run_in_executor(_executor, _elevenlabs_mp3, welcome)
+                        await _send({
+                            "type": "audio",
+                            "data": base64.b64encode(mp3_audio).decode(),
+                            "format": "mp3",
+                        })
+                    except Exception as e:
+                        logger.error(f"Web greeting TTS failed [{session_id}]: {e}")
+                await _send({"type": "status", "state": "idle"})
                 continue
 
             if msg_type != "audio":

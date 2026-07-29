@@ -29,52 +29,6 @@ def _safe_data(result: Any) -> dict:
     return result.data or {}
 
 
-def upsert_user_memory(
-    user_id_hash: str,
-    airport_id: str = DEFAULT_AIRPORT,
-    *,
-    last_flight: str | None = None,
-    last_location: str | None = None,
-    last_location_name: str | None = None,
-    profile_facts_patch: dict[str, str] | None = None,
-) -> None:
-    if not supabase_ok():
-        return
-    try:
-        sb = get_supabase()
-
-        existing_data = _safe_data(
-            sb.table("user_memory")
-            .select("profile_facts, visit_count")
-            .eq("user_id_hash", user_id_hash)
-            .maybe_single()
-            .execute()
-        )
-        existing_facts: dict = existing_data.get("profile_facts") or {}
-        visit_count: int = (existing_data.get("visit_count") or 0) + 1
-        merged_facts = {**existing_facts, **(profile_facts_patch or {})}
-
-        row: dict[str, Any] = {
-            "user_id_hash": user_id_hash,
-            "airport_id": airport_id,
-            "visit_count": visit_count,
-            "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "profile_facts": merged_facts,
-        }
-        if last_flight is not None:
-            row["last_flight"] = last_flight
-        if last_location is not None:
-            row["last_location"] = last_location
-        if last_location_name is not None:
-            row["last_location_name"] = last_location_name
-
-        sb.table("user_memory").upsert(row).execute()
-    except Exception as exc:
-        if is_network_error(exc):
-            mark_supabase_unreachable()
-        logger.exception("upsert_user_memory failed — analytics skipped")
-
-
 def start_call(
     *,
     call_id: str,
@@ -87,23 +41,6 @@ def start_call(
         return
     try:
         sb = get_supabase()
-        # user_memory must exist before calls (FK). Upsert a minimal row if needed.
-        if user_id_hash:
-            existing = _safe_data(
-                sb.table("user_memory")
-                .select("user_id_hash")
-                .eq("user_id_hash", user_id_hash)
-                .maybe_single()
-                .execute()
-            )
-            if not existing:
-                sb.table("user_memory").insert({
-                    "user_id_hash": user_id_hash,
-                    "airport_id": airport_id,
-                    "visit_count": 1,
-                    "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "profile_facts": {},
-                }).execute()
         sb.table("calls").insert({
             "call_id": sid_to_uuid(call_id),
             "airport_id": airport_id,

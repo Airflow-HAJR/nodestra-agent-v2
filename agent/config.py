@@ -53,6 +53,6 @@ TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
 
 # Feature flags
-MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"
+MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"
 FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"
 FLIGHT_TRACKER_ENABLED = os.environ.get("FLIGHT_TRACKER_ENABLED", "false").lower() == "true"

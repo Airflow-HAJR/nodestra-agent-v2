@@ -9,7 +9,6 @@ from langgraph.prebuilt import InjectedState
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-from agent.analytics import hash_user_id, upsert_user_memory
 from agent.config import DEFAULT_AIRPORT, GATEGETTER_URL
 from agent.db import load_map_levels
 from agent.map_engine import (
@@ -19,7 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.memory import get_last_location, save_conversation, search_memories, update_flight, update_location
+from agent.vector_memory import recall_from_cache
 from agent.map_tools import MAP_TOOLS
 
 
@@ -186,14 +185,7 @@ def get_nodes(airport_id: str = DEFAULT_AIRPORT, floor: Optional[str] = None):
 @tool(args_schema=FindNearestInput)
 def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
     """Find the closest POI of a given type from a source location."""
-    # Refresh source from stored location so detours always use the latest location.
     print("[thinking]")
-    user_id = state.get("user_id") if state else None
-    if user_id:
-        fresh = get_last_location(user_id)
-        if fresh and fresh != source:
-            source = fresh
-
     levels = load_map_levels(airport_id)
 
     source_found = any(p["id"] == source for lvl in levels for p in lvl["pois"])
@@ -277,11 +269,6 @@ def set_nav_state(
         nav_update["final_destination"] = final_destination
     if current_location is not None:
         nav_update["current_location"] = current_location
-        user_id = state.get("user_id")
-        if user_id:
-            poi = poi_by_id.get(current_location, {})
-            poi_name = poi.get("name") or current_location
-            update_location(user_id, current_location, poi_name)
     return Command(update=nav_update)
 
 
@@ -301,9 +288,6 @@ def set_flight_number(
 ) -> Command:
     """Save the user's flight number to state."""
     print("[thinking]")
-    user_id = state.get("user_id")
-    if user_id:
-        update_flight(user_id, flight_number)
     return Command(update={
         "flight_number": flight_number,
         "messages": [ToolMessage(content=f"Flight number set to {flight_number}", tool_call_id=tool_call_id)],
@@ -323,7 +307,7 @@ class GetFlightStatusInput(BaseModel):
 def get_flight_status(flight_number: str, airport_id: str = DEFAULT_AIRPORT) -> str:
     """Get real-time gate, departure time, and status for a specific flight number.
     Use this whenever you have an exact flight number — it queries the live departure
-    board directly and is much faster than search_flight_info."""
+    board directly."""
     print("[thinking]")
     needle = flight_number.upper().replace(" ", "")
     try:
@@ -373,9 +357,6 @@ def end_call(
     or when you just confirmed the user arrived at their destination and they have no further requests.
     After calling this tool, deliver a brief closing message (e.g. "Safe travels!") and stop asking questions.
     """
-    user_id = state.get("user_id")
-    if user_id:
-        save_conversation(user_id, state.get("messages", []))
     return Command(update={
         "should_end": True,
         "messages": [ToolMessage(content="call ended", tool_call_id=tool_call_id)],
@@ -395,74 +376,39 @@ class RecallUserMemoriesInput(BaseModel):
     )
 
 
+def _recall(state: dict, query: str) -> str:
+    """Semantic recall over the session's cached memories."""
+    user_id = state.get("user_id") if state else None
+    if not user_id:
+        return "No user profile — this is a guest session with no stored memories."
+    cached = state.get("user_memories") if state else None
+    hits = recall_from_cache(cached, query, top_k=5)
+    if not hits:
+        return "No relevant user memories found."
+    return "\n".join(f"- {h['content']}" for h in hits)
+
+
 @tool(args_schema=RecallUserMemoriesInput)
 def recall_user_memories(
     query: str,
     state: Annotated[dict, InjectedState] = {},
 ) -> str:
-    """Search this user's stored preferences for facts relevant to the current conversation.
+    """Search this user's stored memories for facts relevant to the current conversation.
     Pass a short phrase describing the topic (e.g. 'food preferences', 'payment cards').
-    Only returns preference facts above a relevance threshold — no metadata like visit count or location.
+    Only returns facts above a semantic-relevance threshold.
     Call whenever the user asks what you remember, or when their history would help you assist them."""
     print("[thinking]")
-    user_id = state.get("user_id") if state else None
-    if not user_id:
-        return "No user profile — this is a guest session with no stored memories."
-    return search_memories(user_id, query)
+    return _recall(state, query)
 
 
-class UpdateUserMemoryInput(BaseModel):
-    facts: dict[str, str] = Field(
-        description=(
-            "Key-value facts about this user to remember for future calls. "
-            "E.g. {'preferred_airline': 'Southwest', 'card': 'Amex Platinum', 'home_city': 'Seattle'}"
-        )
-    )
-
-
-@tool(args_schema=UpdateUserMemoryInput)
-def update_user_memory(
-    facts: dict[str, str],
-    state: Annotated[dict, InjectedState] = {},
-) -> str:
-    """Persist anything useful learned about this user for future calls.
-    Call whenever the user reveals a preference, loyalty card, home city, airline, accessibility need, etc."""
-    print("[thinking]")
-    user_id = state.get("user_id") if state else None
-    if user_id:
-        upsert_user_memory(hash_user_id(user_id), DEFAULT_AIRPORT, profile_facts_patch=facts)
-    return "Got it, I'll remember that."
+# Note: there is no explicit "save memory" tool. The memory_extract node
+# (agent/graph.py) is the single writer — it decides what's worth remembering
+# after each turn and persists it. A second writer here caused duplicate rows.
 
 
 # ---------------------------------------------------------------------------
-# Local vector search tools
+# User memory search tool
 # ---------------------------------------------------------------------------
-
-class SearchFlightsInput(BaseModel):
-    query: str = Field(description="Natural language query about a flight, e.g. 'United flight to Denver' or 'WN 2341'")
-
-@tool(args_schema=SearchFlightsInput)
-def search_flight_info(query: str) -> str:
-    """Look up OAK departure info — gate, time, boarding status — for a specific flight or airline."""
-    from agent.local_search import search_flights
-    results = search_flights(query)
-    if not results:
-        return "No matching flights found in the departure board."
-    return "\n---\n".join(results)
-
-
-class SearchStoresInput(BaseModel):
-    query: str = Field(description="Natural language query about stores or restaurants, e.g. 'coffee near gate 10' or 'sushi'")
-
-@tool(args_schema=SearchStoresInput)
-def search_store_info(query: str) -> str:
-    """Look up OAK airport stores, restaurants, and amenities — hours, location, payment options."""
-    from agent.local_search import search_stores
-    results = search_stores(query)
-    if not results:
-        return "No matching stores or restaurants found."
-    return "\n---\n".join(results)
-
 
 class SearchUserMemoriesInput(BaseModel):
     query: str = Field(
@@ -479,14 +425,11 @@ def search_user_memories(
     state: Annotated[dict, InjectedState] = {},
 ) -> str:
     """Search this user's stored memories for facts relevant to a short query phrase.
-    Returns only entries above a relevance threshold — e.g. querying 'credit cards'
-    returns something like 'card: Amex Platinum'. Use this for targeted lookups
-    instead of recall_user_memories when you only need specific facts."""
+    Returns only entries above a semantic-relevance threshold — e.g. querying
+    'credit cards' surfaces 'Has an Amex Platinum card'. Use this for targeted
+    lookups when you only need specific facts."""
     print("[thinking]")
-    user_id = state.get("user_id") if state else None
-    if not user_id:
-        return "No user profile — this is a guest session with no stored memories."
-    return search_memories(user_id, query)
+    return _recall(state, query)
 
 
 # ---------------------------------------------------------------------------
@@ -536,10 +479,7 @@ TOOLS = [
     set_flight_number,
     # get_flight_status,  # enable when GateGetter server is running
     end_call,
-    update_user_memory,
     recall_user_memories,
-    search_flight_info,
-    search_store_info,
     search_user_memories,
     track_flight_changes,
     *MAP_TOOLS,

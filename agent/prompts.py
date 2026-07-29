@@ -11,7 +11,7 @@ NAV STATE: {nav}
 CURRENT TIME: May 17, 12:00 pm
 {session_block}
 PHASE FOCUS: {phase_focus}
-{error_block}{commerce_block}
+{error_block}
 Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
 
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
@@ -23,11 +23,8 @@ Tool use:
 - resolve_poi: only when find_poi returns multiple candidates.
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
 - set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
-- update_user_memory: call whenever the user reveals something worth remembering across future calls — loyalty cards, preferred airline, home city, accessibility needs, seat preferences, etc.
-- recall_user_memories: call whenever the user asks what you remember about them, or when their history would help you assist. Pass a short query phrase based on the topic (e.g. "food preferences", "payment cards", "lounge access"). Returns only relevant preference facts above a relevance threshold.
+- recall_user_memories: call whenever the user asks what you remember about them, or when their history would help you assist. Pass a short query phrase based on the topic (e.g. "food preferences", "payment cards", "lounge access"). Returns only relevant preference facts above a relevance threshold. (You do not save memories yourself — that happens automatically.)
 - search_user_memories: same as recall_user_memories — use either for targeted mid-conversation lookups. Pass a short phrase like "credit cards", "preferred airline", "dietary restrictions".
-- search_flight_info: look up a specific flight's gate, departure time, and status from the departure board.
-- search_store_info: look up stores, restaurants, or amenities by category or name.
 - show_map_destination: show a destination pin on the user's map screen. Call after find_poi when the user asks where something is.
 - show_map_directions: show walking directions on the user's map screen. Call after get_route when giving navigation instructions. Pass user_lat/user_lng if GPS is available in state.
 - show_map_route: show a multi-stop route on the user's map. Use for complex routes with several named waypoints.
@@ -35,7 +32,7 @@ Tool use:
 
 Routing flow:
 1. User states destination → find_poi → set_nav_state(final_destination=<id>).
-2. Determine start location — in this order: (a) if suggested_location is in nav state, ask the user to confirm it before using it; (b) otherwise ask the user where they are now. Always resolve with find_poi, then set_nav_state(current_location=<id>). Never skip this step.
+2. Determine start location — ask the user where they are now. Always resolve with find_poi, then set_nav_state(current_location=<id>). Never skip this step.
 3. get_route(start=current_location, end=final_destination).
 BATCHING RULE: Once find_poi results are back and you have confirmed IDs for both start and destination, call set_nav_state AND get_route as parallel tool calls in the SAME response. Never call set_nav_state or get_route in the same round as find_poi — wait for the find_poi results first.
 3b. After get_route returns, call show_map_directions(destination_poi_id, destination_name) so the user can see the route on the map. This is mandatory for every navigation turn.
@@ -72,12 +69,9 @@ PHASE_FOCUS: dict[str, str] = {
     ),
     "navigate": (
         "The destination is set. Before you can route, you need a confirmed start location:\n"
-        "1. If suggested_location appears in nav state: ask the user to confirm — e.g. 'Are you still near [name]?' "
-        "If yes, call set_nav_state(current_location=<suggested id>). "
-        "If no, ask where they are and use find_poi to resolve it, then set_nav_state.\n"
-        "2. If current_location is unknown and no suggested_location: ask the user where they are now, "
+        "1. If current_location is unknown: ask the user where they are now, "
         "then use find_poi to resolve it, then set_nav_state(current_location=<id>).\n"
-        "3. Once current_location is confirmed in nav state, call get_route(start=current_location, end=final_destination). "
+        "2. Once current_location is confirmed in nav state, call get_route(start=current_location, end=final_destination). "
         "Give the total estimated time first, then name only the FIRST checkpoint — tell the user to look for it and head that way. "
         "Do not say 'go from X to Y'. Do not name the path between two points. Just say what to look for next.\n"
         "Never use find_nearest to guess or infer the start location. "
@@ -142,9 +136,9 @@ PHASE_FOCUS: dict[str, str] = {
     # ── Airport Operations ────────────────────────────────────────────────────
     "flight_info": (
         "The user has a question about their flight — gate number, boarding time, delay status, or connection. "
-        "Use search_flight_info to get the real gate and status before answering. Never guess flight info. "
         "If set_flight_number hasn't been called yet and the user mentions a flight number, call it now. "
-        "Always confirm gate against current state before routing."
+        "You do not have a live departure board, so never invent gate numbers, times, or statuses — "
+        "if you don't know, say so and suggest they check the airline app or airport screens."
     ),
     "airport_infrastructure": (
         "The user needs help with airport operations — TSA/security, customs, immigration, ID requirements, "
@@ -177,7 +171,7 @@ PHASE_FOCUS: dict[str, str] = {
 def _derive_phases(state: State) -> list[str]:
     """Return the ordered list of active intent phases for this turn.
 
-    Uses active_intents from state (set by tools and prefetch nodes) plus
+    Uses active_intents from state (set by the detect_intent node and tools) plus
     final_destination presence as a fallback for navigation. Falls back to
     ["clarify"] when nothing is known yet. Any intent in active_intents that
     has a PHASE_FOCUS entry is included — no hardcoded combinations.
@@ -208,15 +202,10 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         focus = PHASE_FOCUS.get(phase, "")
     else:
         focus = _build_phase_focus(_derive_phases(state))
-    suggested = state.get("suggested_location")
     nav = (
         f"current_location={state.get('current_location') or 'unknown'} | "
         f"final_destination={state.get('final_destination') or 'unknown'} | "
         f"flight_number={state.get('flight_number') or 'unknown'}"
-        + (
-            f" | suggested_location={suggested['name']} (id={suggested['id']}, from previous visit — ask user to confirm before using)"
-            if suggested else ""
-        )
     )
     err = state.get("last_error")
     error_block = (
@@ -224,36 +213,23 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         if err
         else ""
     )
-    profile = state.get("user_profile") or {}
-    session_parts: list[str] = []
-    if profile.get("visit_count"):
-        session_parts.append(f"visit_count={profile['visit_count']}")
-    if profile.get("last_flight"):
-        session_parts.append(f"last_flight_number={profile['last_flight']}")
-    if profile.get("last_location"):
-        session_parts.append(f"last_location_id={profile['last_location']}")
-    session_block = f"USER SESSION: {' | '.join(session_parts)}" if session_parts else ""
+    # The recall_memory node already picked the memories relevant to this message.
+    # Surface them prominently so the agent actually uses them (no embeddings needed).
+    relevant = state.get("relevant_memories") or []
+    if relevant:
+        mem_lines = "\n".join(f"- {m['content']}" for m in relevant)
+        session_block = (
+            "WHAT YOU KNOW ABOUT THIS USER (relevant to what they just said — use it to "
+            "personalize your help; if they ask what you remember, tell them these):\n" + mem_lines
+        )
+    else:
+        session_block = ""
 
-    commerce = state.get("commerce_context")
-    commerce_block = (
-        f"\nCOMMERCE CONTEXT (user preferences retrieved from memory):\n{commerce}\n"
-        "COMMERCE INSTRUCTIONS: The user has just indicated which preference they want you to search for. "
-        "Call search_store_info using their stated preference as the query. "
-        "Then critically evaluate the results — only recommend a result if it genuinely matches what the user asked for. "
-        "If the results do not actually match (e.g. user asked for Mediterranean but results are Mexican), "
-        "say so honestly: tell them you couldn't find that specific option at OAK, then offer the closest "
-        "relevant alternative only if it's meaningfully related (e.g. halal-certified as a dietary overlap). "
-        "Never present a non-matching result as if it is what they asked for. "
-        "Keep it to 2-3 spoken sentences, no lists or markdown.\n"
-        if commerce
-        else ""
-    )
     current_time = datetime.now().strftime("%I:%M %p")
     return SYSTEM_TEMPLATE.format(
         nav=nav,
         session_block=session_block,
         phase_focus=focus,
         error_block=error_block,
-        commerce_block=commerce_block,
         current_time=current_time,
     )

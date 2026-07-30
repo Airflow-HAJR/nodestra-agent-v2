@@ -30,6 +30,7 @@ from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
 from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
 from agent.config import (
+    ALLOWED_ORIGINS,
     CARTESIA_API_KEY,
     CARTESIA_EMOTION,
     CARTESIA_MODEL_ID,
@@ -80,10 +81,17 @@ app = FastAPI(title="Oakland Airport Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _origin_allowed(origin: str | None) -> bool:
+    """CORSMiddleware only guards HTTP requests, not the WebSocket handshake —
+    browsers don't apply same-origin policy to WS the way they do to fetch/XHR.
+    Callers of /web/stream must check the Origin header themselves."""
+    return "*" in ALLOWED_ORIGINS or origin in ALLOWED_ORIGINS
 
 _executor = ThreadPoolExecutor(max_workers=10)
 
@@ -753,9 +761,12 @@ async def web_stream(ws: WebSocket):
         { "type": "map_action",         "action": {...} }  — show/clear a destination, route, or directions on the map
         { "type": "error",              "message": "..." }
     """
+    if not _origin_allowed(ws.headers.get("origin")):
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
 
-    # Add CORS-friendly origin handling — accept all origins for now
     loop = asyncio.get_running_loop()
     session_id = str(uuid.uuid4())
     language = "en"
@@ -1013,6 +1024,12 @@ async def web_stream(ws: WebSocket):
                     logger.error(f"Deepgram live connect failed [{session_id}]: {e}")
                     dg_cm = None
                     dg_socket = None
+                    # Without this, the client's VAD still runs its full
+                    # start/silence cycle and sends audio_end expecting a
+                    # reply that never comes — it hangs in "thinking" with
+                    # no transcript and no error, forever.
+                    await _send({"type": "error", "message": "Couldn't connect to speech recognition. Please try again."})
+                    await _send({"type": "status", "state": "idle"})
                     continue
 
                 dg_final_holder = {"text": ""}
@@ -1029,6 +1046,11 @@ async def web_stream(ws: WebSocket):
 
             elif msg_type == "audio_end":
                 if dg_socket is None:
+                    # No live socket (connect failed earlier, or was never
+                    # opened) — tell the client rather than leaving it
+                    # hanging in "thinking" with nothing ever arriving.
+                    await _send({"type": "error", "message": "Speech recognition wasn't active for that. Please try again."})
+                    await _send({"type": "status", "state": "idle"})
                     continue
 
                 try:

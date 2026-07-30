@@ -22,7 +22,7 @@ def summarize(messages: list, state: dict[str, Any]) -> dict:
         from langchain_core.messages import HumanMessage, SystemMessage
         from agent.llm import build_llm
 
-        llm = build_llm()
+        llm = build_llm(fast=True)
 
         # Trim to last 20 messages to keep prompt small
         trimmed = messages[-20:] if len(messages) > 20 else messages

@@ -258,7 +258,7 @@ _intent_classifier = None
 def _get_intent_classifier():
     global _intent_classifier
     if _intent_classifier is None:
-        _intent_classifier = build_llm().with_structured_output(_IntentResult, method="json_mode")
+        _intent_classifier = build_llm(fast=True).with_structured_output(_IntentResult, method="json_mode")
     return _intent_classifier
 
 
@@ -325,7 +325,7 @@ _memory_selector = None
 def _get_memory_selector():
     global _memory_selector
     if _memory_selector is None:
-        _memory_selector = build_llm().with_structured_output(
+        _memory_selector = build_llm(fast=True).with_structured_output(
             _RelevantMemories, method="json_mode"
         )
     return _memory_selector
@@ -410,7 +410,7 @@ _memory_extractor = None
 def _get_memory_extractor():
     global _memory_extractor
     if _memory_extractor is None:
-        _memory_extractor = build_llm().with_structured_output(
+        _memory_extractor = build_llm(fast=True).with_structured_output(
             _MemoryExtraction, method="json_mode"
         )
     return _memory_extractor

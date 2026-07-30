@@ -28,7 +28,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
-from agent.graph import bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
+from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
     CARTESIA_EMOTION,
@@ -749,7 +749,8 @@ async def web_stream(ws: WebSocket):
         { "type": "transcript",         "role": "user"|"agent", "text": "..." }
         { "type": "partial_transcript", "text": "...", "final": false }  — live growing transcript while user speaks
         { "type": "audio",              "data": "<base64 mp3>" }
-        { "type": "status",             "state": "idle"|"thinking"|"speaking" }
+        { "type": "status",             "state": "idle"|"thinking"|"speaking", "label": "..." }
+        { "type": "map_action",         "action": {...} }  — show/clear a destination, route, or directions on the map
         { "type": "error",              "message": "..." }
     """
     await ws.accept()
@@ -883,17 +884,27 @@ async def web_stream(ws: WebSocket):
                 loop,
             )
 
+        def map_cb(action: dict) -> None:
+            """Fires from the graph's executor thread whenever a map tool
+            (show_map_destination, show_map_directions, ...) runs — relay the
+            action to the browser immediately so the map updates live."""
+            asyncio.run_coroutine_threadsafe(
+                _send({"type": "map_action", "action": action}),
+                loop,
+            )
+
         try:
             with bind_tool_status_callback(tool_status_cb):
-                # loop.run_in_executor doesn't propagate contextvars to the
-                # worker thread, so the callback bound just above wouldn't be
-                # visible inside _graph_reply unless we carry the context over
-                # explicitly via copy_context().run(...).
-                ctx = contextvars.copy_context()
-                reply = await loop.run_in_executor(
-                    _executor,
-                    lambda t=user_text: ctx.run(_graph_reply, t, session_id, user_id)
-                )
+                with bind_map_callback(map_cb):
+                    # loop.run_in_executor doesn't propagate contextvars to the
+                    # worker thread, so the callbacks bound just above wouldn't
+                    # be visible inside _graph_reply unless we carry the context
+                    # over explicitly via copy_context().run(...).
+                    ctx = contextvars.copy_context()
+                    reply = await loop.run_in_executor(
+                        _executor,
+                        lambda t=user_text: ctx.run(_graph_reply, t, session_id, user_id)
+                    )
             agent_text = reply["text"]
         except GraphRecursionError:
             agent_text = "I'm having trouble with that right now. Can you rephrase?"

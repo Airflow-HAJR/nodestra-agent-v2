@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import logging
@@ -17,6 +18,7 @@ from deepgram import AsyncDeepgramClient
 from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
 from elevenlabs import ElevenLabs
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
@@ -26,7 +28,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
-from agent.graph import bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
+from agent.graph import bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
 from agent.config import (
     CARTESIA_API_KEY,
     CARTESIA_EMOTION,
@@ -52,11 +54,37 @@ from agent.logger import log_event
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Short present-tense labels shown in the web UI's status bar while a tool runs,
+# keyed by tool name (see agent.graph._TOOL_SPEAK_PRIORITY for the matching
+# TTS phrases used on the phone line — kept separate since these are UI-only).
+_TOOL_STATUS_LABELS: dict[str, str] = {
+    "get_route": "Charting course...",
+    "find_poi": "Searching map...",
+    "find_nearest": "Finding nearest option...",
+    "resolve_poi": "Narrowing it down...",
+    "get_nodes": "Loading the map...",
+    "recall_user_memories": "Checking your preferences...",
+    "search_flight_info": "Checking flights...",
+    "get_flight_status": "Checking flight status...",
+    "search_store_info": "Searching shops...",
+    "track_flight_changes": "Setting up flight tracking...",
+    "update_user_memory": "Remembering that...",
+    "search_user_memories": "Checking your preferences...",
+}
+
 # Suppress noisy third-party HTTP logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("watchfiles").setLevel(logging.WARNING)
 
 app = FastAPI(title="Oakland Airport Agent")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 _executor = ThreadPoolExecutor(max_workers=10)
 
 # mulaw silence ≈ 0xFF/0x7F; voice = significant deviation from those values.
@@ -459,8 +487,12 @@ async def twilio_stream(ws: WebSocket):
             try:
                 with bind_speak_early_callback(early_speak_cb):
                     with bind_sentence_callback(sentence_cb):
+                        # loop.run_in_executor doesn't propagate contextvars to the
+                        # worker thread — carry the bound callbacks over explicitly.
+                        ctx = contextvars.copy_context()
                         reply = await loop.run_in_executor(
-                            _executor, _graph_reply, transcript, call_sid or "", from_number
+                            _executor,
+                            lambda: ctx.run(_graph_reply, transcript, call_sid or "", from_number),
                         )
             except GraphRecursionError as e:
                 log_event("graph_error", thread_id=call_sid or "", error_type="GraphRecursionError", message=str(e))
@@ -697,6 +729,344 @@ async def twilio_stream(ws: WebSocket):
             logger.exception(f"Analytics write failed for call {call_sid}")
 
 
+# ── Web Push-to-Talk WebSocket ────────────────────────────────────────────────
+
+@app.websocket("/web/stream")
+async def web_stream(ws: WebSocket):
+    """
+    Browser always-on voice endpoint (no Twilio).
+
+    Protocol:
+      Client → Server (JSON):
+        { "type": "config",      "language": "en", "userId": "..." }
+        { "type": "audio",       "data": "<base64 webm/opus>", "language": "en", "format": "webm" }
+        { "type": "audio_start", "language": "en" }               — begin a live-transcribed utterance
+        { "type": "audio_chunk", "data": "<base64 webm/opus>" }   — repeated small chunks while speaking
+        { "type": "audio_end" }                                   — VAD detected silence; finalize + run turn
+        { "type": "text",        "text": "...", "language": "en" }
+
+      Server → Client (JSON):
+        { "type": "transcript",         "role": "user"|"agent", "text": "..." }
+        { "type": "partial_transcript", "text": "...", "final": false }  — live growing transcript while user speaks
+        { "type": "audio",              "data": "<base64 mp3>" }
+        { "type": "status",             "state": "idle"|"thinking"|"speaking" }
+        { "type": "error",              "message": "..." }
+    """
+    await ws.accept()
+
+    # Add CORS-friendly origin handling — accept all origins for now
+    loop = asyncio.get_running_loop()
+    session_id = str(uuid.uuid4())
+    language = "en"
+    user_id: str | None = None
+
+    # Per-utterance Deepgram live-streaming state (see audio_start/audio_chunk/audio_end below)
+    dg_client = AsyncDeepgramClient(api_key=DEEPGRAM_API_KEY) if DEEPGRAM_API_KEY else None
+    dg_cm = None
+    dg_socket = None
+    dg_recv_task: asyncio.Task | None = None
+    dg_final_holder: dict | None = None
+    dg_final_event: asyncio.Event | None = None
+
+    logger.info(f"Web stream connected: {session_id}")
+
+    async def _send(msg: dict) -> None:
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
+
+    async def _close_dg_socket() -> None:
+        """Tear down any in-flight Deepgram live connection (best-effort)."""
+        nonlocal dg_cm, dg_socket, dg_recv_task
+        if dg_recv_task is not None:
+            dg_recv_task.cancel()
+            dg_recv_task = None
+        if dg_cm is not None:
+            try:
+                await dg_cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            dg_cm = None
+        dg_socket = None
+
+    async def _transcribe_audio(audio_bytes: bytes, fmt: str) -> str | None:
+        """Send audio bytes to Deepgram REST API for transcription."""
+        if not DEEPGRAM_API_KEY:
+            logger.error("DEEPGRAM_API_KEY not set — cannot transcribe")
+            return None
+        try:
+            import httpx
+            mime_map = {"webm": "audio/webm", "ogg": "audio/ogg", "mp4": "audio/mp4"}
+            mime = mime_map.get(fmt, "audio/webm")
+
+            lang_code = language if language not in ("auto", "") else None
+            params: dict = {"model": "nova-3", "smart_format": "true", "punctuate": "true"}
+            if lang_code:
+                params["language"] = lang_code
+            else:
+                params["detect_language"] = "true"
+
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    "https://api.deepgram.com/v1/listen",
+                    headers={
+                        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                        "Content-Type": mime,
+                    },
+                    content=audio_bytes,
+                    params=params,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            channels = data.get("results", {}).get("channels", [{}])
+            alts = channels[0].get("alternatives", [{}])
+            transcript = alts[0].get("transcript", "").strip()
+            logger.info(f"Deepgram transcript: '{transcript}'")
+            return transcript or None
+        except Exception as e:
+            logger.error(f"Deepgram transcription failed: {e}")
+            return None
+
+    async def _tts_mp3_bytes(text: str) -> bytes | None:
+        """Generate MP3 bytes using configured TTS provider."""
+        try:
+            if TTS_PROVIDER == "elevenlabs" and _eleven and ELEVENLABS_VOICE_ID:
+                audio_bytes = b"".join(
+                    await loop.run_in_executor(
+                        _executor,
+                        lambda: list(_eleven.text_to_speech.convert(
+                            voice_id=ELEVENLABS_VOICE_ID,
+                            text=text,
+                            model_id="eleven_flash_v2_5",
+                            output_format="mp3_44100_128",
+                        ))
+                    )
+                )
+                return audio_bytes
+            elif CARTESIA_API_KEY:
+                resp = await loop.run_in_executor(
+                    _executor,
+                    lambda: _requests.post(
+                        _CARTESIA_URL,
+                        headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
+                        json={
+                            "model_id": CARTESIA_MODEL_ID,
+                            "transcript": text,
+                            "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+                            "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+                            "language": language if len(language) == 2 else "en",
+                            "generation_config": {"emotion": CARTESIA_EMOTION, "speed": "fast"},
+                        },
+                        timeout=15,
+                    )
+                )
+                resp.raise_for_status()
+                return resp.content
+        except Exception as e:
+            logger.error(f"TTS failed: {e}")
+        return None
+
+    async def _run_turn(user_text: str) -> None:
+        """Run the agent graph on already-transcribed text and speak the reply."""
+        await _send({"type": "status", "state": "thinking"})
+
+        def tool_status_cb(tool_name: str) -> None:
+            """Fires from the graph's executor thread the moment a tool call
+            is about to run — relay a short status label to the browser."""
+            label = _TOOL_STATUS_LABELS.get(tool_name)
+            if not label:
+                return
+            asyncio.run_coroutine_threadsafe(
+                _send({"type": "status", "state": "thinking", "label": label}),
+                loop,
+            )
+
+        try:
+            with bind_tool_status_callback(tool_status_cb):
+                # loop.run_in_executor doesn't propagate contextvars to the
+                # worker thread, so the callback bound just above wouldn't be
+                # visible inside _graph_reply unless we carry the context over
+                # explicitly via copy_context().run(...).
+                ctx = contextvars.copy_context()
+                reply = await loop.run_in_executor(
+                    _executor,
+                    lambda t=user_text: ctx.run(_graph_reply, t, session_id, user_id)
+                )
+            agent_text = reply["text"]
+        except GraphRecursionError:
+            agent_text = "I'm having trouble with that right now. Can you rephrase?"
+        except Exception as e:
+            logger.error(f"Graph error: {e}", exc_info=True)
+            agent_text = "Something went wrong. Please try again."
+
+        await _send({"type": "transcript", "role": "agent", "text": agent_text})
+
+        await _send({"type": "status", "state": "speaking"})
+        mp3_bytes = await _tts_mp3_bytes(agent_text)
+        if mp3_bytes:
+            await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
+
+        await _send({"type": "status", "state": "idle"})
+
+    async def _dg_receiver(sock, holder: dict, done: asyncio.Event) -> None:
+        """Relay Deepgram live results back to the client as partial_transcript
+        messages, accumulating finalized fragments into `holder["text"]`."""
+        try:
+            async for m in sock:
+                if getattr(m, "type", None) != "Results":
+                    continue
+                alt = m.channel.alternatives[0]
+                text = alt.transcript
+                if not text:
+                    if m.speech_final:
+                        done.set()
+                    continue
+
+                if m.is_final:
+                    holder["text"] = f"{holder['text']} {text}".strip()
+                    await _send({"type": "partial_transcript", "text": holder["text"], "final": bool(m.speech_final)})
+                    if m.speech_final:
+                        done.set()
+                else:
+                    preview = f"{holder['text']} {text}".strip()
+                    await _send({"type": "partial_transcript", "text": preview, "final": False})
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Deepgram live receiver error [{session_id}]: {e}")
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            msg_type = msg.get("type")
+
+            if msg_type == "config":
+                language = msg.get("language", "en")
+                user_id = msg.get("userId") or user_id
+                logger.info(f"Web stream [{session_id}] config: lang={language} user={user_id}")
+
+                # Send greeting on first config message
+                greeting = "Welcome to Oakland International Airport! I'm your AI guide. Ask me anything — gates, flights, restaurants, restrooms, or directions anywhere in the terminal."
+                await _send({"type": "transcript", "role": "agent", "text": greeting})
+                await _send({"type": "status", "state": "speaking"})
+                mp3_bytes = await _tts_mp3_bytes(greeting)
+                if mp3_bytes:
+                    await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
+                await _send({"type": "status", "state": "idle"})
+
+            elif msg_type == "audio":
+                audio_b64 = msg.get("data", "")
+                fmt = msg.get("format", "webm")
+                language = msg.get("language", language)
+
+                if not audio_b64:
+                    await _send({"type": "error", "message": "Empty audio data"})
+                    continue
+
+                audio_bytes = base64.b64decode(audio_b64)
+
+                await _send({"type": "status", "state": "thinking"})
+                transcript = await _transcribe_audio(audio_bytes, fmt)
+
+                if not transcript:
+                    await _send({"type": "error", "message": "Could not understand audio. Please try again."})
+                    await _send({"type": "status", "state": "idle"})
+                    continue
+
+                logger.info(f"Web [{session_id}] transcript: {transcript[:100]}")
+                await _send({"type": "transcript", "role": "user", "text": transcript})
+                await _run_turn(transcript)
+
+            elif msg_type == "audio_start":
+                language = msg.get("language", language)
+
+                if dg_client is None:
+                    await _send({"type": "error", "message": "Speech recognition is not configured."})
+                    continue
+
+                await _close_dg_socket()  # safety net if a previous utterance wasn't cleanly closed
+
+                dg_cm = dg_client.listen.v1.connect(
+                    model="nova-3",
+                    interim_results=True,
+                    punctuate=True,
+                    smart_format=True,
+                    language=language if language not in ("auto", "") else None,
+                )
+                try:
+                    dg_socket = await dg_cm.__aenter__()
+                except Exception as e:
+                    logger.error(f"Deepgram live connect failed [{session_id}]: {e}")
+                    dg_cm = None
+                    dg_socket = None
+                    continue
+
+                dg_final_holder = {"text": ""}
+                dg_final_event = asyncio.Event()
+                dg_recv_task = asyncio.create_task(_dg_receiver(dg_socket, dg_final_holder, dg_final_event))
+
+            elif msg_type == "audio_chunk":
+                chunk_b64 = msg.get("data", "")
+                if dg_socket is not None and chunk_b64:
+                    try:
+                        await dg_socket.send_media(base64.b64decode(chunk_b64))
+                    except Exception as e:
+                        logger.error(f"Deepgram send_media failed [{session_id}]: {e}")
+
+            elif msg_type == "audio_end":
+                if dg_socket is None:
+                    continue
+
+                try:
+                    await dg_socket.send_finalize()
+                    if dg_final_event is not None:
+                        try:
+                            await asyncio.wait_for(dg_final_event.wait(), timeout=3.0)
+                        except asyncio.TimeoutError:
+                            pass
+                except Exception as e:
+                    logger.error(f"Deepgram finalize failed [{session_id}]: {e}")
+
+                transcript = (dg_final_holder or {}).get("text", "").strip()
+                await _close_dg_socket()
+                dg_final_holder = None
+                dg_final_event = None
+
+                if not transcript:
+                    await _send({"type": "error", "message": "Could not understand audio. Please try again."})
+                    await _send({"type": "status", "state": "idle"})
+                    continue
+
+                logger.info(f"Web [{session_id}] live transcript: {transcript[:100]}")
+                await _send({"type": "transcript", "role": "user", "text": transcript})
+                await _run_turn(transcript)
+
+            elif msg_type == "text":
+                text_in = (msg.get("text") or "").strip()
+                language = msg.get("language", language)
+
+                if not text_in:
+                    await _send({"type": "error", "message": "Empty text"})
+                    continue
+
+                await _send({"type": "transcript", "role": "user", "text": text_in})
+                await _run_turn(text_in)
+
+    except WebSocketDisconnect:
+        logger.info(f"Web stream disconnected: {session_id}")
+    except Exception as e:
+        logger.error(f"Web stream error [{session_id}]: {e}", exc_info=True)
+        try:
+            await _send({"type": "error", "message": "Server error. Please reconnect."})
+        except Exception:
+            pass
+    finally:
+        await _close_dg_socket()
+
+
 # ── Voice entry point ─────────────────────────────────────────────────────────
 
 @app.post("/twilio/voice")
@@ -856,6 +1226,28 @@ async def twilio_sms(request: Request):
     mr = MessagingResponse()
     mr.message(reply["text"])
     return Response(content=str(mr), media_type="application/xml")
+
+
+# ── SMS invite (web UI "Text me instead") ────────────────────────────────────
+
+class SmsInviteRequest(BaseModel):
+    to: str  # E.164 phone number e.g. "+14155551234"
+
+@app.post("/sms-invite")
+async def sms_invite(req: SmsInviteRequest):
+    """Send a welcome SMS so the user can continue the conversation via text."""
+    if not _twilio or not TWILIO_PHONE_NUMBER:
+        raise HTTPException(status_code=503, detail="SMS not configured")
+    try:
+        body = (
+            f"👋 Hi! You can chat with the Oakland Airport assistant right here via text. "
+            f"Just send us a message and we'll help you navigate the airport, find your gate, check flight status, and more!"
+        )
+        _twilio.messages.create(body=body, from_=TWILIO_PHONE_NUMBER, to=req.to)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"SMS invite failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Gate change notifications (outbound) ──────────────────────────────────────

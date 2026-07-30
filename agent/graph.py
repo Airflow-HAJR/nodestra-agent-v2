@@ -74,6 +74,10 @@ _speak_early_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar
     "speak_early_callback",
     default=None,
 )
+_tool_status_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "tool_status_callback",
+    default=None,
+)
 _sentence_callback_var: ContextVar[Callable[[str | None], None] | None] = ContextVar(
     "sentence_callback",
     default=None,
@@ -110,6 +114,18 @@ def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterato
         yield
     finally:
         _speak_early_callback_var.reset(token)
+
+
+@contextmanager
+def bind_tool_status_callback(callback: Callable[[str], None] | None) -> Iterator[None]:
+    """Bind a callback invoked once per turn with the name of the tool the
+    agent is about to run (e.g. "get_route") — lets callers surface a
+    tool-specific status update (e.g. to a UI) without affecting speech."""
+    token = _tool_status_callback_var.set(callback)
+    try:
+        yield
+    finally:
+        _tool_status_callback_var.reset(token)
 
 
 @contextmanager
@@ -430,8 +446,9 @@ def _pref_ack_node(state: State) -> dict:
 _tool_node = ToolNode(TOOLS, handle_tool_errors=True)
 
 
-def _pick_early_phrase(state: State) -> str | None:
-    idx = _early_speak_idx_var.get()
+def _pick_active_tool_name(state: State) -> str | None:
+    """The name of the highest-priority tool call the agent is about to run
+    (the last message's tool_calls), or None if there isn't one."""
     tool_names: list[str] = []
     for msg in reversed(state["messages"]):
         calls = getattr(msg, "tool_calls", None)
@@ -443,12 +460,22 @@ def _pick_early_phrase(state: State) -> str | None:
 
     for tool_name in _TOOL_SPEAK_PRIORITY:
         if tool_name in tool_names:
-            phrases = _TOOL_SPEAK_MESSAGES[tool_name]
-            if phrases:
-                phrase = phrases[idx % len(phrases)]
-                _early_speak_idx_var.set(idx + 1)
-                return phrase
-            return None  # tool explicitly silenced
+            return tool_name
+    return tool_names[0] if tool_names else None
+
+
+def _pick_early_phrase(state: State, tool_name: str | None = None) -> str | None:
+    idx = _early_speak_idx_var.get()
+    if tool_name is None:
+        tool_name = _pick_active_tool_name(state)
+
+    if tool_name and tool_name in _TOOL_SPEAK_MESSAGES:
+        phrases = _TOOL_SPEAK_MESSAGES[tool_name]
+        if phrases:
+            phrase = phrases[idx % len(phrases)]
+            _early_speak_idx_var.set(idx + 1)
+            return phrase
+        return None  # tool explicitly silenced
 
     phrase = _FALLBACK_SPEAK_MESSAGES[idx % len(_FALLBACK_SPEAK_MESSAGES)]
     _early_speak_idx_var.set(idx + 1)
@@ -459,7 +486,13 @@ def _timed_tools(state: State):
     global _turn_tools_used
 
     if not _spoken_early_var.get():
-        early_msg_text = _pick_early_phrase(state)
+        tool_name = _pick_active_tool_name(state)
+
+        status_cb = _tool_status_callback_var.get()
+        if status_cb and tool_name:
+            status_cb(tool_name)
+
+        early_msg_text = _pick_early_phrase(state, tool_name)
         _spoken_early_var.set(True)
         if early_msg_text:
             speak_early(early_msg_text)

@@ -1,4 +1,3 @@
-import json
 from typing import Annotated, List, Optional
 
 import httpx
@@ -18,7 +17,6 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.vector_memory import recall_from_cache
 from agent.map_tools import MAP_TOOLS
 
 
@@ -364,72 +362,11 @@ def end_call(
 
 
 # ---------------------------------------------------------------------------
-# User memory tools
+# User memory
 # ---------------------------------------------------------------------------
-
-class RecallUserMemoriesInput(BaseModel):
-    query: str = Field(
-        description=(
-            "A short phrase describing what you want to recall, based on what the user is asking about. "
-            "E.g. 'food and dietary restrictions', 'payment cards', 'accessibility needs', 'lounge access'."
-        )
-    )
-
-
-def _recall(state: dict, query: str) -> str:
-    """Semantic recall over the session's cached memories."""
-    user_id = state.get("user_id") if state else None
-    if not user_id:
-        return "No user profile — this is a guest session with no stored memories."
-    cached = state.get("user_memories") if state else None
-    hits = recall_from_cache(cached, query, top_k=5)
-    if not hits:
-        return "No relevant user memories found."
-    return "\n".join(f"- {h['content']}" for h in hits)
-
-
-@tool(args_schema=RecallUserMemoriesInput)
-def recall_user_memories(
-    query: str,
-    state: Annotated[dict, InjectedState] = {},
-) -> str:
-    """Search this user's stored memories for facts relevant to the current conversation.
-    Pass a short phrase describing the topic (e.g. 'food preferences', 'payment cards').
-    Only returns facts above a semantic-relevance threshold.
-    Call whenever the user asks what you remember, or when their history would help you assist them."""
-    print("[thinking]")
-    return _recall(state, query)
-
-
-# Note: there is no explicit "save memory" tool. The memory_extract node
-# (agent/graph.py) is the single writer — it decides what's worth remembering
-# after each turn and persists it. A second writer here caused duplicate rows.
-
-
-# ---------------------------------------------------------------------------
-# User memory search tool
-# ---------------------------------------------------------------------------
-
-class SearchUserMemoriesInput(BaseModel):
-    query: str = Field(
-        description=(
-            "A short phrase describing what you want to look up, "
-            "e.g. 'credit cards', 'preferred airline', 'home city'."
-        )
-    )
-
-
-@tool(args_schema=SearchUserMemoriesInput)
-def search_user_memories(
-    query: str,
-    state: Annotated[dict, InjectedState] = {},
-) -> str:
-    """Search this user's stored memories for facts relevant to a short query phrase.
-    Returns only entries above a semantic-relevance threshold — e.g. querying
-    'credit cards' surfaces 'Has an Amex Platinum card'. Use this for targeted
-    lookups when you only need specific facts."""
-    print("[thinking]")
-    return _recall(state, query)
+# There are no recall/save memory tools. Memory is handled by dedicated graph
+# nodes (agent/graph.py): recall_memory surfaces relevant memories into the
+# prompt each turn, and save_memory persists new facts after each reply.
 
 
 # ---------------------------------------------------------------------------
@@ -479,8 +416,6 @@ TOOLS = [
     set_flight_number,
     # get_flight_status,  # enable when GateGetter server is running
     end_call,
-    recall_user_memories,
-    search_user_memories,
     track_flight_changes,
     *MAP_TOOLS,
 ]

@@ -670,7 +670,6 @@ async def twilio_stream(ws: WebSocket):
             summary_data = await loop.run_in_executor(
                 _executor, summarize, messages, state_snap
             )
-            uid_hash = hash_user_id(from_number) if from_number else None
             await loop.run_in_executor(
                 _executor, lambda: finish_call(
                     call_id=call_sid or str(uuid.uuid4()),

@@ -1,4 +1,3 @@
-import json
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -43,10 +42,6 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Let me figure out which one you mean.",
         "Checking which floor that's on.",
     ],
-    "recall_user_memories": [
-        "Let me check your preferences.",
-        "Looking up what I know about you.",
-    ],
     "get_nodes": [
         "Pulling up the airport map.",
         "Loading the map for you.",
@@ -62,7 +57,7 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Registering your flight alert.",
     ],
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes", "track_flight_changes"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "get_nodes", "track_flight_changes"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",
@@ -595,7 +590,7 @@ def _init_node(state: State) -> dict:
     if not user_id or not MEMORY_ENABLED:
         return {}
 
-    # Bulk-load the user's semantic memories once per session (embeddings included).
+    # Bulk-load the user's memories once per session.
     # Recall for the rest of the session runs against this cache — no per-turn DB hit.
     if state.get("user_memories") is not None:
         return {}

@@ -23,8 +23,6 @@ Tool use:
 - resolve_poi: only when find_poi returns multiple candidates.
 - set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
 - set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
-- recall_user_memories: call whenever the user asks what you remember about them, or when their history would help you assist. Pass a short query phrase based on the topic (e.g. "food preferences", "payment cards", "lounge access"). Returns only relevant preference facts above a relevance threshold. (You do not save memories yourself — that happens automatically.)
-- search_user_memories: same as recall_user_memories — use either for targeted mid-conversation lookups. Pass a short phrase like "credit cards", "preferred airline", "dietary restrictions".
 - show_map_destination: show a destination pin on the user's map screen. Call after find_poi when the user asks where something is.
 - show_map_directions: show walking directions on the user's map screen. Call after get_route when giving navigation instructions. Pass user_lat/user_lng if GPS is available in state.
 - show_map_route: show a multi-stop route on the user's map. Use for complex routes with several named waypoints.
@@ -81,23 +79,22 @@ PHASE_FOCUS: dict[str, str] = {
     # ── Food & Drink ──────────────────────────────────────────────────────────
     "food_drinks": (
         "The user wants food, drinks, or a café. "
-        "Use search_user_memories('dietary restrictions cuisine preferences') to check relevant preferences. "
-        "Surface 2-3 options with preference attribution — name the preference and its source. "
+        "If any dietary or cuisine preferences are listed above, factor them into what you suggest. "
         "Offer directions when they pick one."
     ),
 
     # ── Shopping ──────────────────────────────────────────────────────────────
     "shopping": (
         "The user wants to shop — duty-free, gifts, books, electronics, newsstands, or retail. "
-        "Use search_user_memories('payment cards loyalty programs brand preferences') to check relevant preferences. "
-        "Surface options that align with their cards or preferences. Offer directions when they pick one."
+        "If any payment cards or brand preferences are listed above, align your suggestions with them. "
+        "Offer directions when they pick one."
     ),
 
     # ── Lounges ───────────────────────────────────────────────────────────────
     "lounge_access": (
         "The user wants a lounge. "
-        "Use search_user_memories('lounge access credit cards airline status') to check relevant cards and memberships. "
-        "Confirm eligibility out loud before routing — e.g. 'Your Chase Sapphire gets you into the Escape Lounge.' "
+        "If any lounge cards or memberships are listed above, use them to confirm eligibility out loud "
+        "before routing — e.g. 'Your Chase Sapphire gets you into the Escape Lounge.' "
         "Offer directions once access is confirmed."
     ),
 
@@ -105,7 +102,7 @@ PHASE_FOCUS: dict[str, str] = {
     "payment": (
         "The user is asking about payment: which cards are accepted, Apple Pay support, card benefits, "
         "or which venues give rewards. "
-        "Use search_user_memories('credit cards payment loyalty') to check their cards and payment preferences. "
+        "If any cards or payment preferences are listed above, use them. "
         "Be specific: name the card, the venue, and the benefit (e.g. '3% cashback at duty-free with your Amex')."
     ),
 
@@ -163,7 +160,7 @@ PHASE_FOCUS: dict[str, str] = {
         "visual or hearing impairment services, or accessible restrooms. "
         "Always route via elevators (never escalators or stairs) unless the user confirms otherwise. "
         "Use find_nearest for accessibility-specific amenities. "
-        "If the user mentioned accessibility before, use search_user_memories('accessibility needs') to recall their specific needs."
+        "If any accessibility needs are listed above, honor them without having to ask again."
     ),
 }
 

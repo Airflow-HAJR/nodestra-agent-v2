@@ -5,7 +5,6 @@ from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
 from agent.analytics import finish_call, hash_user_id, insert_turn, start_call
-from agent.config import DEFAULT_AIRPORT
 from agent.graph import ITERATION_CAP, graph
 from agent.graph import get_turn_tools_used
 from agent.summarizer import summarize

@@ -21,6 +21,7 @@ from agent.vector_memory import (
 )
 from agent.tools import TOOLS
 from agent.logger import log_event
+from agent.map_tools import _lookup_gps, _map_callback_var
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "get_route": [
@@ -69,6 +70,10 @@ _speak_early_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar
     "speak_early_callback",
     default=None,
 )
+_tool_status_callback_var: ContextVar[Callable[[str], None] | None] = ContextVar(
+    "tool_status_callback",
+    default=None,
+)
 _sentence_callback_var: ContextVar[Callable[[str | None], None] | None] = ContextVar(
     "sentence_callback",
     default=None,
@@ -105,6 +110,18 @@ def bind_speak_early_callback(callback: Callable[[str], None] | None) -> Iterato
         yield
     finally:
         _speak_early_callback_var.reset(token)
+
+
+@contextmanager
+def bind_tool_status_callback(callback: Callable[[str], None] | None) -> Iterator[None]:
+    """Bind a callback invoked once per turn with the name of the tool the
+    agent is about to run (e.g. "get_route") — lets callers surface a
+    tool-specific status update (e.g. to a UI) without affecting speech."""
+    token = _tool_status_callback_var.set(callback)
+    try:
+        yield
+    finally:
+        _tool_status_callback_var.reset(token)
 
 
 @contextmanager
@@ -471,8 +488,9 @@ def _memory_extract_node(state: State) -> dict:
 _tool_node = ToolNode(TOOLS, handle_tool_errors=True)
 
 
-def _pick_early_phrase(state: State) -> str | None:
-    idx = _early_speak_idx_var.get()
+def _pick_active_tool_name(state: State) -> str | None:
+    """The name of the highest-priority tool call the agent is about to run
+    (the last message's tool_calls), or None if there isn't one."""
     tool_names: list[str] = []
     for msg in reversed(state["messages"]):
         calls = getattr(msg, "tool_calls", None)
@@ -484,23 +502,81 @@ def _pick_early_phrase(state: State) -> str | None:
 
     for tool_name in _TOOL_SPEAK_PRIORITY:
         if tool_name in tool_names:
-            phrases = _TOOL_SPEAK_MESSAGES[tool_name]
-            if phrases:
-                phrase = phrases[idx % len(phrases)]
-                _early_speak_idx_var.set(idx + 1)
-                return phrase
-            return None  # tool explicitly silenced
+            return tool_name
+    return tool_names[0] if tool_names else None
+
+
+def _pick_early_phrase(state: State, tool_name: str | None = None) -> str | None:
+    idx = _early_speak_idx_var.get()
+    if tool_name is None:
+        tool_name = _pick_active_tool_name(state)
+
+    if tool_name and tool_name in _TOOL_SPEAK_MESSAGES:
+        phrases = _TOOL_SPEAK_MESSAGES[tool_name]
+        if phrases:
+            phrase = phrases[idx % len(phrases)]
+            _early_speak_idx_var.set(idx + 1)
+            return phrase
+        return None  # tool explicitly silenced
 
     phrase = _FALLBACK_SPEAK_MESSAGES[idx % len(_FALLBACK_SPEAK_MESSAGES)]
     _early_speak_idx_var.set(idx + 1)
     return phrase
 
 
+def _auto_emit_map_from_tools(state: State, log_messages: list) -> None:
+    """Show the map automatically based on get_route results, so the map
+    reflects the trajectory the agent just planned whether or not it
+    separately remembers to call show_map_directions. A bare POI lookup
+    (find_poi/find_nearest/resolve_poi) isn't a trajectory and isn't worth
+    popping the map open for on its own — only routes trigger this."""
+    cb = _map_callback_var.get()
+    if cb is None or not log_messages:
+        return
+
+    calls_by_id: dict[str, tuple[str, dict]] = {}
+    for msg in reversed(state["messages"]):
+        if calls := getattr(msg, "tool_calls", None):
+            for tc in calls:
+                tc_id = tc["id"] if isinstance(tc, dict) else tc.id
+                name = tc["name"] if isinstance(tc, dict) else tc.name
+                args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
+                calls_by_id[tc_id] = (name, args)
+            break
+
+    for msg in log_messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        call = calls_by_id.get(msg.tool_call_id)
+        if not call:
+            continue
+        name, args = call
+
+        if name == "get_route":
+            # get_route's return value is a speech-formatted string, not
+            # structured JSON — but its call args are already the POI ids we
+            # need, so look those up directly instead of parsing the string.
+            start_gps = _lookup_gps(args.get("start", ""))
+            end_gps = _lookup_gps(args.get("end", ""))
+            if start_gps and end_gps:
+                cb({
+                    "type": "show_directions",
+                    "destination": {"name": end_gps["name"], "lat": end_gps["lat"], "lng": end_gps["lng"]},
+                    "origin": {"lat": start_gps["lat"], "lng": start_gps["lng"]},
+                })
+
+
 def _timed_tools(state: State):
     global _turn_tools_used
 
     if not _spoken_early_var.get():
-        early_msg_text = _pick_early_phrase(state)
+        tool_name = _pick_active_tool_name(state)
+
+        status_cb = _tool_status_callback_var.get()
+        if status_cb and tool_name:
+            status_cb(tool_name)
+
+        early_msg_text = _pick_early_phrase(state, tool_name)
         _spoken_early_var.set(True)
         if early_msg_text:
             speak_early(early_msg_text)
@@ -545,6 +621,8 @@ def _timed_tools(state: State):
             )
             log_event("tool_result", tool_name=msg.name or "", status=status,
                       content=str(msg.content)[:200])
+
+    _auto_emit_map_from_tools(state, log_messages)
 
     return result
 

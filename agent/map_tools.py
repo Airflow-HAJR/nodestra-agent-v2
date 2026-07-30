@@ -68,6 +68,9 @@ from typing import Callable, Iterator, Optional
 from langchain.tools import tool
 from pydantic import BaseModel, Field
 
+from agent.config import DEFAULT_AIRPORT
+from agent.db import load_map_levels
+
 # ---------------------------------------------------------------------------
 # Hardcoded GPS coordinates for OAK airport POIs (testing only)
 # Replace with Supabase data once GPS coordinates are added to the maps table.
@@ -167,8 +170,45 @@ def _emit(action: dict) -> None:
         cb(action)
 
 
-def _lookup_gps(poi_id: str) -> Optional[dict]:
-    """Find GPS coords for a POI id: exact match, then prefix/substring match."""
+# ---------------------------------------------------------------------------
+# Real POI ids (e.g. "gate-7WH7") come from the live Supabase map graph, whose
+# POIs only carry a normalized (x, y) floor-plan position — not GPS. This
+# bounding box calibrates that [0,1] plan grid onto real-world lat/lng so
+# real POIs (not just the OAK_GPS demo set above) can be pinned on the map.
+# (0, 0) = plan's top-left corner, (1, 1) = bottom-right.
+# ---------------------------------------------------------------------------
+
+_AIRPORT_GPS_BOUNDS: dict[str, dict] = {
+    "OAK": {"nw_lat": 37.7145, "nw_lng": -122.2230, "se_lat": 37.7105, "se_lng": -122.2160},
+}
+
+
+def _plan_to_latlng(airport_id: str, x: float, y: float) -> Optional[dict]:
+    bounds = _AIRPORT_GPS_BOUNDS.get(airport_id)
+    if not bounds:
+        return None
+    return {
+        "lat": bounds["nw_lat"] + y * (bounds["se_lat"] - bounds["nw_lat"]),
+        "lng": bounds["nw_lng"] + x * (bounds["se_lng"] - bounds["nw_lng"]),
+    }
+
+
+def _lookup_gps(poi_id: str, airport_id: str = DEFAULT_AIRPORT) -> Optional[dict]:
+    """Resolve GPS coords for a POI id.
+
+    Tries the real map graph first (converting the POI's indoor floor-plan
+    x/y into lat/lng), then falls back to the OAK_GPS demo dict — exact
+    match, then prefix/substring — for the old hardcoded test ids."""
+    try:
+        for lvl in load_map_levels(airport_id):
+            for p in lvl["pois"]:
+                if p["id"] == poi_id:
+                    latlng = _plan_to_latlng(airport_id, p["x"], p["y"])
+                    if latlng:
+                        return {**latlng, "name": p.get("name", poi_id)}
+    except Exception:
+        pass  # Supabase not configured / unreachable — fall through to demo dict
+
     key = poi_id.lower().strip()
     if key in OAK_GPS:
         return OAK_GPS[key]

@@ -65,3 +65,9 @@ GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"
 FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"
 FLIGHT_TRACKER_ENABLED = os.environ.get("FLIGHT_TRACKER_ENABLED", "false").lower() == "true"
+
+# Comma-separated list of origins allowed to hit the HTTP/WS API, e.g.
+# "https://agent.nodestra.com". Defaults to "*" (any origin) for local dev —
+# set explicitly in production.
+_allowed_origins_raw = os.environ.get("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]

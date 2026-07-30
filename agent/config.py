@@ -5,12 +5,21 @@ load_dotenv()
 
 DEFAULT_AIRPORT = "OAK"
 
-# Azure OpenAI
-AZURE_OPENAI_API_KEY = os.environ["AZURE_OPENAI_API_KEY"]
-AZURE_OPENAI_ENDPOINT = os.environ["AZURE_OPENAI_ENDPOINT"]
-AZURE_OPENAI_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT"]
+# LLM provider: "openai" | "azure"
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").lower()
+
+# OpenAI (default provider). Two tiers:
+#   MAIN — capable model for the agent (the part that matters)
+#   FAST — small, fast model for helper nodes (intent, recall, save, summary)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL_MAIN = os.environ.get("OPENAI_MODEL_MAIN", "gpt-4o")
+OPENAI_MODEL_FAST = os.environ.get("OPENAI_MODEL_FAST", "gpt-4o-mini")
+
+# Azure OpenAI (optional fallback provider; set LLM_PROVIDER=azure to use)
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 
 # Supabase (map data)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -53,7 +62,7 @@ TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
 
 # Feature flags
-MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "false").lower() == "true"
+MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"
 FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"
 FLIGHT_TRACKER_ENABLED = os.environ.get("FLIGHT_TRACKER_ENABLED", "false").lower() == "true"
 

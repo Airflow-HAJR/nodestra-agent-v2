@@ -27,8 +27,8 @@ from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
-from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call, upsert_user_memory
-from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
+from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call
+from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
 from agent.config import (
     ALLOWED_ORIGINS,
     CARTESIA_API_KEY,
@@ -710,7 +710,6 @@ async def twilio_stream(ws: WebSocket):
             summary_data = await loop.run_in_executor(
                 _executor, summarize, messages, state_snap
             )
-            uid_hash = hash_user_id(from_number) if from_number else None
             await loop.run_in_executor(
                 _executor, lambda: finish_call(
                     call_id=call_sid or str(uuid.uuid4()),
@@ -723,16 +722,6 @@ async def twilio_stream(ws: WebSocket):
                     summary=summary_data["summary"],
                 )
             )
-            if uid_hash:
-                await loop.run_in_executor(
-                    _executor, lambda: upsert_user_memory(
-                        uid_hash,
-                        DEFAULT_AIRPORT,
-                        last_flight=state_snap.get("flight_number"),
-                        last_location=state_snap.get("current_location"),
-                        last_location_name=None,
-                    )
-                )
         except Exception:
             logger.exception(f"Analytics write failed for call {call_sid}")
 
@@ -1234,14 +1223,6 @@ async def twilio_sms(request: Request):
                     summary=summary_data["summary"],
                 )
             )
-            if uid_hash:
-                await loop.run_in_executor(
-                    _executor, lambda: upsert_user_memory(
-                        uid_hash, DEFAULT_AIRPORT,
-                        last_flight=state_snap.get("flight_number"),
-                        last_location=state_snap.get("current_location"),
-                    )
-                )
         except Exception:
             logger.exception(f"SMS analytics write failed for {from_number}")
         mr = MessagingResponse()

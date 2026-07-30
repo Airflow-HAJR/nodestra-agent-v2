@@ -13,8 +13,6 @@ class State(TypedDict):
     last_error: Optional[str]
     should_end: Optional[bool]
     user_id: Optional[str]
-    commerce_context: Optional[str]
     active_intents: Optional[List[str]]
-    user_profile: Optional[dict]  # profile_facts loaded from user_memory at session start
-    suggested_location: Optional[dict]  # {id, name} from memory — not yet confirmed by user
-    pref_acked: Optional[bool]  # True after _pref_ack_node fires; prevents re-firing on follow-up turns
+    user_memories: Optional[List[dict]]  # ALL of this user's memories, loaded once at session start; refreshed on write
+    relevant_memories: Optional[List[dict]]  # subset the recall_memory node judged relevant to the current message

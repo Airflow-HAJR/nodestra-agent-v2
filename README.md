@@ -24,6 +24,26 @@ Set these for Twilio local hosting:
 - `ELEVENLABS_API_KEY`
 - `SERVER_BASE_URL` (public tunnel URL while running locally)
 
+## Text Test UI (no voice)
+
+A minimal browser chat for testing the agent + semantic memory system without
+Twilio or audio.
+
+1. Apply the memory migration once in the Supabase SQL editor:
+   `supabase/migrations/20250728000000_user_memories_vector.sql`
+2. For semantic recall, set `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` to a deployed
+   embedding model. Without it, memory falls back to substring matching.
+3. Run the UI:
+
+```bash
+uv run uvicorn webchat:app --reload --port 8100
+```
+
+Open http://localhost:8100. The left panel shows what the agent has remembered
+about the current user id. State a fact ("I only eat halal food"), start a new
+conversation, and ask for recommendations — it recalls from the per-user vector
+store. Memory is loaded once per session and refreshed in-process on write.
+
 ## Run Locally With Twilio
 
 1. Start the app:

@@ -7,14 +7,18 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from pydantic import BaseModel as _PydanticBase
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
 from agent.config import MEMORY_ENABLED
 from agent.llm import build_llm
-from agent.memory import get_last_flight, get_last_location_with_name, get_session_metadata, search_memories
 from agent.prompts import build_system_prompt
 from agent.state import State
 from agent.timing import add_llm, add_memory, add_tool
+from agent.vector_memory import (
+    add_memory as vm_add_memory,
+    fetch_all_memories,
+    is_duplicate,
+)
 from agent.tools import TOOLS
 from agent.logger import log_event
 from agent.map_tools import _lookup_gps, _map_callback_var
@@ -39,10 +43,6 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Let me figure out which one you mean.",
         "Checking which floor that's on.",
     ],
-    "recall_user_memories": [
-        "Let me check your preferences.",
-        "Looking up what I know about you.",
-    ],
     "get_nodes": [
         "Pulling up the airport map.",
         "Loading the map for you.",
@@ -53,20 +53,12 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "show_map_directions": [],    # silent — map update, no filler needed
     "show_map_route": [],         # silent — map update, no filler needed
     "clear_map": [],              # silent — map update, no filler needed
-    "search_flight_info": [
-        "Checking the departure board.",
-        "Looking up that flight.",
-    ],
-    "search_store_info": [
-        "Looking up the shops and restaurants.",
-        "Checking what's available.",
-    ],
     "track_flight_changes": [
         "Setting up flight tracking for you.",
         "Registering your flight alert.",
     ],
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "recall_user_memories", "get_nodes", "search_flight_info", "search_store_info", "track_flight_changes"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "get_nodes", "track_flight_changes"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",
@@ -209,7 +201,7 @@ def _agent_node(state: State):
         )
     else:
         # Reset active_intents each turn so stale intents from prior turns don't pollute routing.
-        # Commerce prefetch and set_nav_state will repopulate them for this turn.
+        # detect_intent and set_nav_state repopulate them for this turn.
         response = _llm_with_tools.invoke([
             SystemMessage(content=system),
             *state["messages"],
@@ -245,10 +237,7 @@ def _repair_node(state: State):
     return {"last_error": err[:300]}
 
 
-# ================= intent detection & prefetch =================
-
-# Intents that trigger a memory prefetch when detected
-_PREFETCH_INTENTS = {"navigate", "food_drinks", "shopping", "lounge_access", "payment"}
+# ================= intent detection =================
 
 _INTENT_SYSTEM = """\
 You are an intent classifier for an airport voice assistant.
@@ -286,7 +275,7 @@ _intent_classifier = None
 def _get_intent_classifier():
     global _intent_classifier
     if _intent_classifier is None:
-        _intent_classifier = build_llm().with_structured_output(_IntentResult, method="json_mode")
+        _intent_classifier = build_llm(fast=True).with_structured_output(_IntentResult, method="json_mode")
     return _intent_classifier
 
 
@@ -314,145 +303,184 @@ def _detect_intents(messages: list) -> list[str]:
         return []
 
 
-def _prefetch_router(state: State) -> Literal["prefetch", "agent"]:
-    """Always route to prefetch — LLM detection inside prefetch decides what (if anything) to fetch."""
-    return "prefetch"
-
-
-def _prefetch_node(state: State) -> dict:
-    """Pre-fetch personalization data for intents where it meaningfully affects the response.
-
-    Queries user memory for navigate, food_drinks, shopping, lounge_access, and payment intents.
-    Sets specific detected intent names in active_intents so PHASE_FOCUS renders the right instructions.
-    """
-    # Detect intents from recent conversation context (not just the last message)
+def _detect_intent_node(state: State) -> dict:
+    """Classify the user's intent so PHASE_FOCUS renders the right instructions.
+    Sets active_intents; does not touch memory."""
     detected = _detect_intents(state["messages"])
-
-    # Merge with any intents already in state (e.g. navigate set by set_nav_state)
     existing = list(state.get("active_intents") or [])
     merged_intents = list({*existing, *detected})
-
     print(f"[intents detected: {detected or 'none'}]")
+    return {"active_intents": merged_intents}
 
-    if not MEMORY_ENABLED:
-        print("[memory disabled — skipping preference prefetch]")
-        return {"commerce_context": None, "active_intents": merged_intents}
 
-    t0 = time.time()
-    parts: list[str] = []
-    prefs: str | None = None
-    user_id = state.get("user_id")
+# ================= memory recall =================
 
-    active_prefetch = [i for i in detected if i in _PREFETCH_INTENTS]
-    needs_navigate = "navigate" in active_prefetch
-    needs_food = "food_drinks" in active_prefetch
-    needs_lounge = "lounge_access" in active_prefetch
-    # Co-occurrence rules: food/shopping always pull payment; navigate always pulls accessibility
-    needs_payment = "payment" in active_prefetch or "shopping" in active_prefetch or needs_food
-    needs_accessibility = needs_navigate  # navigate always checks mobility/accessibility prefs
+_MEMORY_SELECT_SYSTEM = """\
+You help an airport assistant decide which of the things it remembers about a user \
+are useful for the user's LATEST message.
 
-    effective_intents = list(active_prefetch)
-    if needs_payment and "payment" not in effective_intents:
-        effective_intents.append("payment")
-    if needs_accessibility and "accessibility" not in effective_intents:
-        effective_intents.append("accessibility")
-    print(f"[prefetch intents: {effective_intents}]")
+You are given the user's stored memories and their latest message. Return the subset \
+of those memories (copied verbatim) that would help you respond well.
 
-    # Map each effective intent to a short, clean memory query term
-    _INTENT_QUERY: dict[str, str] = {
-        "navigate":     "route mobility accessibility",
-        "food_drinks":  "food diet cuisine",
-        "shopping":     "shopping preference",
-        "lounge_access":"lounge membership",
-        "payment":      "payment card loyalty",
-        "accessibility":"mobility wheelchair elevator",
-    }
+Guidance:
+- If the user is asking what you know / remember about them, return ALL memories.
+- Include a memory if it should shape your answer (e.g. they ask about food and you \
+know a dietary restriction; they ask for directions and you know a mobility need).
+- If nothing is relevant, return an empty list.
 
-    if user_id and effective_intents:
-        query_terms = " ".join(
-            _INTENT_QUERY[i] for i in effective_intents if i in _INTENT_QUERY
+Respond with JSON only: {"relevant": ["<memory text>", ...]}\
+"""
+
+
+class _RelevantMemories(_PydanticBase):
+    relevant: list[str]
+
+
+_memory_selector = None
+
+
+def _get_memory_selector():
+    global _memory_selector
+    if _memory_selector is None:
+        _memory_selector = build_llm(fast=True).with_structured_output(
+            _RelevantMemories, method="json_mode"
         )
-        query = query_terms
-        print(f"[memory query: {query!r}]")
-        t1 = time.time()
-        prefs = search_memories(user_id, query)
-        add_memory(time.time() - t1)
-        print(f"[memory result: {prefs!r}]")
-        if prefs and "no memories" not in prefs.lower():
-            parts.append(f"USER_PREFERENCES:\n{prefs}")
-
-    has_prefs = bool(prefs and "no memories" not in prefs.lower())
-    log_event(
-        "prefetch",
-        user_id=user_id or "",
-        detected_intents=detected,
-        has_prefs=has_prefs,
-        latency_ms=(time.time() - t0) * 1000,
-    )
-
-    return {
-        "commerce_context": "\n\n".join(parts) if parts else None,
-        "active_intents": merged_intents,
-    }
+    return _memory_selector
 
 
-# ================= preference acknowledgment =================
-
-def _pref_ack_router(state: State) -> Literal["pref_ack", "agent"]:
-    """Route to pref_ack only on the first turn preferences are found; then let agent handle it."""
-    if state.get("pref_acked"):
-        return "agent"
-    commerce = state.get("commerce_context") or ""
-    if "USER_PREFERENCES:" in commerce:
-        return "pref_ack"
-    return "agent"
-
-
-def _pref_ack_node(state: State) -> dict:
-    """Use the LLM to generate a fun, natural preference-acknowledgment and ask the user to choose.
-
-    Skips the main agent this turn. On the next turn, the agent sees pref_acked=True and
-    routes straight to agent which calls search_store_info with the user's stated choice.
-    """
-    commerce = state.get("commerce_context") or ""
-    # Parse "key: value" lines out of the USER_PREFERENCES block
-    pref_lines: list[str] = []
-    in_block = False
-    for line in commerce.splitlines():
-        if line.strip() == "USER_PREFERENCES:":
-            in_block = True
-            continue
-        if in_block and line.strip():
-            pref_lines.append(line.strip())
-
-    if not pref_lines:
+def _memory_recall_node(state: State) -> dict:
+    """Look at everything we remember about the user (loaded once at session start)
+    and pick the subset relevant to their latest message. The chosen memories are
+    surfaced prominently in the system prompt so the agent actually uses them."""
+    if not MEMORY_ENABLED:
         return {}
+    memories = state.get("user_memories") or []
+    if not memories:
+        return {"relevant_memories": []}
 
-    last_msg = ""
+    last_user = None
     for m in reversed(state["messages"]):
         if isinstance(m, HumanMessage):
-            last_msg = m.content if isinstance(m.content, str) else str(m.content)
+            last_user = m.content if isinstance(m.content, str) else str(m.content)
             break
+    if not last_user:
+        return {"relevant_memories": []}
 
-    # Pass the full key:value list so the LLM sees food AND payment preferences
-    prefs_block = "\n".join(pref_lines)
+    listing = "\n".join(f"- {m['content']}" for m in memories)
+    try:
+        t0 = time.time()
+        result = _get_memory_selector().invoke([
+            SystemMessage(content=_MEMORY_SELECT_SYSTEM),
+            HumanMessage(content=f"Stored memories:\n{listing}\n\nUser's latest message: \"{last_user}\""),
+        ])
+        add_llm(time.time() - t0)
+    except Exception as e:
+        print(f"[memory recall failed: {e}]")
+        return {"relevant_memories": memories}  # safe fallback: give the agent everything
 
-    prompt = (
-        f"The user just said: \"{last_msg}\"\n\n"
-        f"Their stored preferences from past visits:\n{prefs_block}\n\n"
-        "In 1-2 casual spoken sentences: tell them you're pulling up their past preferences, "
-        "reference the most relevant ones for what they asked (cover both food AND payment if both are present), "
-        "then ask if they want to go with one of those or try something different. "
-        "Be natural and warm. No lists, no markdown."
-    )
+    chosen = [c.strip().lower() for c in (result.relevant or [])]
+    relevant = [
+        m for m in memories
+        if any(m["content"].strip().lower() == c or m["content"].strip().lower() in c or c in m["content"].strip().lower()
+               for c in chosen)
+    ]
+    print(f"[memory recall: {[m['content'] for m in relevant] or 'nothing relevant'}]")
+    return {"relevant_memories": relevant}
 
-    t0 = time.time()
-    response = build_llm().invoke([SystemMessage(content=prompt)])
-    add_llm(time.time() - t0)
 
-    msg = response.content if isinstance(response.content, str) else str(response.content)
-    speak_early(msg)
-    return {"messages": [AIMessage(content=msg)], "pref_acked": True}
+# ================= memory extraction (save) =================
+
+_MEMORY_EXTRACT_SYSTEM = """\
+You decide whether the user's latest message contains DURABLE personal facts \
+worth remembering for future conversations with an airport assistant.
+
+Remember things like: dietary restrictions or allergies (halal, vegan, nut allergy), \
+accessibility needs (uses a wheelchair, avoids stairs), preferred airline, loyalty or \
+payment cards, home city, who they travel with, and lasting preferences.
+
+Do NOT remember: one-off requests ("take me to gate 5"), questions, today-only details \
+(a specific flight number for this trip), small talk, or acknowledgements.
+
+Break the message into ATOMIC facts — ONE preference per fact, each with its own \
+category. Never combine unrelated facts (e.g. a diet and a mobility need) into one entry.
+
+Respond with JSON only:
+{"remember": true/false, "facts": [{"content": "<concise third-person fact>", "category": "dietary|payment|accessibility|travel|preference|personal|other"}]}
+
+If nothing is worth remembering: {"remember": false, "facts": []}\
+"""
+
+
+class _MemoryFact(_PydanticBase):
+    content: str
+    category: str
+
+
+class _MemoryExtraction(_PydanticBase):
+    remember: bool
+    facts: list[_MemoryFact]
+
+
+_memory_extractor = None
+
+
+def _get_memory_extractor():
+    global _memory_extractor
+    if _memory_extractor is None:
+        _memory_extractor = build_llm(fast=True).with_structured_output(
+            _MemoryExtraction, method="json_mode"
+        )
+    return _memory_extractor
+
+
+def _memory_extract_node(state: State) -> dict:
+    """After the agent's final answer, decide if the user's last message held a
+    durable fact. If so, persist it and append it to the session cache so it's
+    recallable for the rest of this call without re-querying the DB."""
+    if not MEMORY_ENABLED:
+        return {}
+    user_id = state.get("user_id")
+    if not user_id:
+        return {}
+
+    last_user = None
+    for m in reversed(state["messages"]):
+        if isinstance(m, HumanMessage):
+            last_user = m.content if isinstance(m.content, str) else str(m.content)
+            break
+    if not last_user:
+        return {}
+
+    try:
+        result = _get_memory_extractor().invoke([
+            SystemMessage(content=_MEMORY_EXTRACT_SYSTEM),
+            HumanMessage(content=last_user),
+        ])
+    except Exception as e:
+        print(f"[memory extract failed: {e}]")
+        return {}
+
+    if not result or not result.remember or not result.facts:
+        return {}
+
+    cached = list(state.get("user_memories") or [])
+    saved = 0
+    for fact in result.facts:
+        content = (fact.content or "").strip()
+        if not content:
+            continue
+        if is_duplicate(cached, content):
+            print(f"[memory: skipped duplicate — {content!r}]")
+            continue
+        t0 = time.time()
+        row = vm_add_memory(user_id, content, fact.category or "other")
+        add_memory(time.time() - t0)
+        if row:
+            cached.append(row)
+            saved += 1
+            print(f"[memory: saved ({row['category']}) — {row['content']!r}]")
+
+    return {"user_memories": cached} if saved else {}
 
 
 # ================= subgraph builder =================
@@ -599,23 +627,32 @@ def _timed_tools(state: State):
     return result
 
 
+def _after_agent_router(state: State) -> Literal["tools", "save_memory"]:
+    """Tool-call turns go to the tools node; a final answer goes to save_memory
+    (which decides what, if anything, to remember) before ending."""
+    last = state["messages"][-1]
+    if getattr(last, "tool_calls", None):
+        return "tools"
+    return "save_memory"
+
+
 def _build_subgraph():
     builder = StateGraph(State)
-    builder.add_node("prefetch", _prefetch_node)
+    builder.add_node("detect_intent", _detect_intent_node)
+    builder.add_node("recall_memory", _memory_recall_node)
     builder.add_node("agent", _agent_node)
     builder.add_node("tools", _timed_tools)
     builder.add_node("repair", _repair_node)
-    builder.add_node("pref_ack", _pref_ack_node)
+    builder.add_node("save_memory", _memory_extract_node)
+
+    builder.add_edge(START, "detect_intent")
+    builder.add_edge("detect_intent", "recall_memory")
+    builder.add_edge("recall_memory", "agent")
     builder.add_conditional_edges(
-        START, _prefetch_router,
-        {"prefetch": "prefetch", "agent": "agent"},
+        "agent", _after_agent_router,
+        {"tools": "tools", "save_memory": "save_memory"},
     )
-    builder.add_conditional_edges(
-        "prefetch", _pref_ack_router,
-        {"pref_ack": "pref_ack", "agent": "agent"},
-    )
-    builder.add_edge("pref_ack", END)
-    builder.add_conditional_edges("agent", tools_condition)
+    builder.add_edge("save_memory", END)
     builder.add_conditional_edges(
         "tools", _check_tool_errors, {"repair": "repair", "agent": "agent"}
     )
@@ -626,52 +663,21 @@ def _build_subgraph():
 # ================= init (location pre-load) =================
 
 def _init_node(state: State) -> dict:
-    """At conversation start, restore the user's last known location and flight from memory."""
+    """At conversation start, bulk-load the user's semantic memories once."""
     user_id = state.get("user_id")
     if not user_id or not MEMORY_ENABLED:
         return {}
-    # Only run on the very first turn — user_profile persists in checkpoint after that
-    if state.get("user_profile"):
+
+    # Bulk-load the user's memories once per session.
+    # Recall for the rest of the session runs against this cache — no per-turn DB hit.
+    if state.get("user_memories") is not None:
         return {}
-    result: dict = {}
 
     t0 = time.time()
-    meta = get_session_metadata(user_id)
+    memories = fetch_all_memories(user_id)
     add_memory(time.time() - t0)
-
-    if meta:
-        result["user_profile"] = {
-            "visit_count": meta.get("visit_count"),
-            "last_flight": meta.get("last_flight"),
-            "last_location": meta.get("last_location"),
-            "last_location_name": meta.get("last_location_name"),
-            "last_seen": meta.get("last_seen"),
-        }
-        visit = meta.get("visit_count") or 0
-        last_loc = meta.get("last_location_name") or "unknown"
-        last_flight = meta.get("last_flight") or "unknown"
-        print(f"[session: visit #{visit}, last location: {last_loc}, last flight: {last_flight}]")
-
-    if not state.get("current_location") and not state.get("suggested_location"):
-        poi_id = meta.get("last_location") if meta else None
-        poi_name = meta.get("last_location_name") if meta else None
-        if not poi_id:
-            t0 = time.time()
-            poi_id, poi_name = get_last_location_with_name(user_id)
-            add_memory(time.time() - t0)
-        if poi_id:
-            result["suggested_location"] = {"id": poi_id, "name": poi_name or poi_id}
-
-    if not state.get("flight_number"):
-        flight = meta.get("last_flight") if meta else None
-        if not flight:
-            t0 = time.time()
-            flight = get_last_flight(user_id)
-            add_memory(time.time() - t0)
-        if flight:
-            result["flight_number"] = flight
-
-    return result
+    print(f"[memory: loaded {len(memories)} stored memories for session]")
+    return {"user_memories": memories}
 
 
 # ================= main graph =================

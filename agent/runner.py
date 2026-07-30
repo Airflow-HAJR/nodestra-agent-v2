@@ -4,10 +4,8 @@ import uuid
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphRecursionError
 
-from agent.analytics import finish_call, hash_user_id, insert_turn, start_call, upsert_user_memory
-from agent.config import DEFAULT_AIRPORT
+from agent.analytics import finish_call, hash_user_id, insert_turn, start_call
 from agent.graph import ITERATION_CAP, graph
-from agent.memory import save_conversation
 from agent.graph import get_turn_tools_used
 from agent.summarizer import summarize
 from agent import timing
@@ -58,18 +56,10 @@ def run(user_id: str | None = None):
                 resolved=summary_data["resolved"],
                 summary=summary_data["summary"],
             )
-            if uid_hash and result:
-                upsert_user_memory(
-                    uid_hash, DEFAULT_AIRPORT,
-                    last_flight=state_snap.get("flight_number"),
-                    last_location=state_snap.get("current_location"),
-                )
             print("\n[session ended — analytics written]")
             break
 
         if user.lower() in ("exit", "quit"):
-            if user_id and result:
-                save_conversation(user_id, result["messages"])
             break
 
         timing.reset()

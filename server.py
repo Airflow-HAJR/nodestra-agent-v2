@@ -28,7 +28,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call
-from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, get_turn_tools_used
+from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
 from agent.config import (
     ALLOWED_ORIGINS,
     CARTESIA_API_KEY,

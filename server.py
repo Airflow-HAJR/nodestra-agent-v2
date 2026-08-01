@@ -1031,7 +1031,15 @@ async def web_stream(ws: WebSocket):
                     try:
                         await dg_socket.send_media(base64.b64decode(chunk_b64))
                     except Exception as e:
+                        # The live socket died mid-utterance (e.g. a keepalive
+                        # ping timeout) — tear it down now instead of retrying
+                        # every subsequent chunk against a dead connection,
+                        # which just floods the log and silently loses audio
+                        # until audio_end's 3s finalize timeout.
                         logger.error(f"Deepgram send_media failed [{session_id}]: {e}")
+                        await _close_dg_socket()
+                        await _send({"type": "error", "message": "Speech recognition connection dropped. Please try again."})
+                        await _send({"type": "status", "state": "idle"})
 
             elif msg_type == "audio_end":
                 if dg_socket is None:

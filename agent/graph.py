@@ -21,7 +21,7 @@ from agent.vector_memory import (
 )
 from agent.tools import TOOLS
 from agent.logger import log_event
-from agent.map_tools import _lookup_gps, _map_callback_var
+from agent.map_tools import _lookup_gps, _map_callback_var, _resolve_trajectory_segments
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "get_route": [
@@ -52,6 +52,9 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "show_map_destination": [],   # silent — map update, no filler needed
     "show_map_directions": [],    # silent — map update, no filler needed
     "show_map_route": [],         # silent — map update, no filler needed
+    "show_map_trajectory": [],    # silent — map update, no filler needed
+    "request_checkpoint_confirmation": [],  # silent — the agent speaks prompt_text itself
+    "advance_map_trajectory": [], # silent — map update, no filler needed
     "clear_map": [],              # silent — map update, no filler needed
     "track_flight_changes": [
         "Setting up flight tracking for you.",
@@ -524,12 +527,29 @@ def _pick_early_phrase(state: State, tool_name: str | None = None) -> str | None
     return phrase
 
 
-def _auto_emit_map_from_tools(state: State, log_messages: list) -> None:
+def _extract_tool_state_update(result, key: str):
+    """Pull a state key out of a ToolNode result — a dict for a plain tool,
+    or a list of dict/Command entries when any tool in the batch returns
+    Command (get_route among them, for last_route/route_id)."""
+    if isinstance(result, dict):
+        return result.get(key)
+    if isinstance(result, list):
+        for item in result:
+            if isinstance(item, dict) and key in item:
+                return item[key]
+            upd = getattr(item, "update", None)
+            if isinstance(upd, dict) and key in upd:
+                return upd[key]
+    return None
+
+
+def _auto_emit_map_from_tools(state: State, result, log_messages: list) -> None:
     """Show the map automatically based on get_route results, so the map
     reflects the trajectory the agent just planned whether or not it
-    separately remembers to call show_map_directions. A bare POI lookup
-    (find_poi/find_nearest/resolve_poi) isn't a trajectory and isn't worth
-    popping the map open for on its own — only routes trigger this."""
+    separately remembers to call show_map_directions/show_map_trajectory. A
+    bare POI lookup (find_poi/find_nearest/resolve_poi) isn't a trajectory
+    and isn't worth popping the map open for on its own — only routes
+    trigger this."""
     cb = _map_callback_var.get()
     if cb is None or not log_messages:
         return
@@ -553,9 +573,29 @@ def _auto_emit_map_from_tools(state: State, log_messages: list) -> None:
         name, args = call
 
         if name == "get_route":
-            # get_route's return value is a speech-formatted string, not
-            # structured JSON — but its call args are already the POI ids we
-            # need, so look those up directly instead of parsing the string.
+            raw = _extract_tool_state_update(result, "last_route")
+            if raw and raw.get("level_changes"):
+                # Multi-level route — show the floor-by-floor trajectory
+                # (current floor only) instead of a flat two-point line.
+                route_id = _extract_tool_state_update(result, "route_id") or ""
+                segments = _resolve_trajectory_segments(raw)
+                first_stops = segments[0]["stops"] if segments else []
+                last_stops = segments[-1]["stops"] if segments else []
+                if first_stops and last_stops:
+                    cb({
+                        "type": "show_trajectory",
+                        "routeId": route_id,
+                        "origin": {"name": first_stops[0]["name"], "lat": first_stops[0]["lat"], "lng": first_stops[0]["lng"]},
+                        "destination": {"name": last_stops[-1]["name"], "lat": last_stops[-1]["lat"], "lng": last_stops[-1]["lng"]},
+                        "segments": segments,
+                        "activeSegmentIndex": 0,
+                        "etaMinutes": raw.get("estimated_minutes"),
+                    })
+                continue
+
+            # Single-level (or GPS-lookup failed for the trajectory) — fall
+            # back to the flat directions line, re-deriving GPS from the tool
+            # call's own args since get_route's ToolMessage content is prose.
             start_gps = _lookup_gps(args.get("start", ""))
             end_gps = _lookup_gps(args.get("end", ""))
             if start_gps and end_gps:
@@ -622,7 +662,7 @@ def _timed_tools(state: State):
             log_event("tool_result", tool_name=msg.name or "", status=status,
                       content=str(msg.content)[:200])
 
-    _auto_emit_map_from_tools(state, log_messages)
+    _auto_emit_map_from_tools(state, result, log_messages)
 
     return result
 

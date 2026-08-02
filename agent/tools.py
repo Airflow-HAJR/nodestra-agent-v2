@@ -1,3 +1,4 @@
+import uuid
 from typing import Annotated, List, Optional
 
 import httpx
@@ -137,8 +138,23 @@ def resolve_poi(
     }
 
 
+def _fmt_stop(i: int, p: dict) -> dict:
+    return {
+        "step": i + 1,
+        "id": p["id"],
+        "name": p["name"],
+        "type": p.get("type", ""),
+        "level": p.get("level_name", ""),
+    }
+
+
 @tool(args_schema=RouteInput)
-def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: Annotated[dict, InjectedState] = {}):
+def get_route(
+    start: str,
+    end: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    airport_id: str = DEFAULT_AIRPORT,
+) -> Command:
     """Get shortest path between two POIs. start and end must be POI ids returned by find_poi."""
     print("[thinking]")
 
@@ -146,25 +162,32 @@ def get_route(start: str, end: str, airport_id: str = DEFAULT_AIRPORT, state: An
     result = dijkstra_multilevel(levels, start, end)
 
     if not result:
-        return {"found": False, "stops": [], "level_changes": [], "distance": 0, "estimated_minutes": 0}
+        msg = ToolMessage(content="No route found.", tool_call_id=tool_call_id)
+        return Command(update={"messages": [msg], "last_route": None, "active_segment_index": None})
 
     raw = {
         "found": True,
-        "stops": [
-            {
-                "step": i + 1,
-                "id": p["id"],
-                "name": p["name"],
-                "type": p.get("type", ""),
-                "level": p.get("level_name", ""),
-            }
-            for i, p in enumerate(result["poi_stops"])
-        ],
+        "stops": [_fmt_stop(i, p) for i, p in enumerate(result["poi_stops"])],
         "level_changes": result["level_changes"],
+        "segments": [
+            {
+                "level_name": seg["level_name"],
+                "stops": [_fmt_stop(i, p) for i, p in enumerate(seg["stops"])],
+                "portal_out": _fmt_stop(0, seg["portal_out"]) if seg["portal_out"] else None,
+            }
+            for seg in result["segments"]
+        ],
         "distance": round(result["distance"], 4),
         "estimated_minutes": max(1, round(result["distance"] * 10)),
     }
-    return format_route_speech(raw)
+    speech = format_route_speech(raw)
+    msg = ToolMessage(content=speech, tool_call_id=tool_call_id)
+    return Command(update={
+        "messages": [msg],
+        "last_route": raw,
+        "active_segment_index": 0,
+        "route_id": str(uuid.uuid4()),
+    })
 
 
 @tool(args_schema=GetNodesInput)

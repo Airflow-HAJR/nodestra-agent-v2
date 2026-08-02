@@ -359,10 +359,17 @@ def _extract_response_text(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _graph_reply(user_text: str, thread_id: str, user_id: str | None = None) -> dict[str, Any]:
+def _graph_reply(
+    user_text: str,
+    thread_id: str,
+    user_id: str | None = None,
+    user_location: dict | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
     if user_id:
         payload["user_id"] = user_id
+    if user_location:
+        payload["user_location"] = user_location
     result = graph.invoke(payload, config=_build_graph_config(thread_id))
     response_text = _extract_response_text(result)
     if not response_text:
@@ -760,6 +767,7 @@ async def web_stream(ws: WebSocket):
     session_id = str(uuid.uuid4())
     language = "en"
     user_id: str | None = None
+    latest_location: dict | None = None  # {lat, lng, accuracy, ts} — most recent GPS fix from the client
 
     # Per-utterance Deepgram live-streaming state (see audio_start/audio_chunk/audio_end below)
     dg_client = AsyncDeepgramClient(api_key=DEEPGRAM_API_KEY) if DEEPGRAM_API_KEY else None
@@ -887,11 +895,15 @@ async def web_stream(ws: WebSocket):
         def map_cb(action: dict) -> None:
             """Fires from the graph's executor thread whenever a map tool
             (show_map_destination, show_map_directions, ...) runs — relay the
-            action to the browser immediately so the map updates live."""
-            asyncio.run_coroutine_threadsafe(
-                _send({"type": "map_action", "action": action}),
-                loop,
-            )
+            action to the browser immediately so the map updates live.
+            checkpoint_prompt/checkpoint_resolved aren't map redraws — they're
+            conversational UI state — so they go out as their own top-level
+            message type instead of being wrapped in map_action."""
+            if action.get("type") in ("checkpoint_prompt", "checkpoint_resolved"):
+                payload = {k: v for k, v in action.items()}
+            else:
+                payload = {"type": "map_action", "action": action}
+            asyncio.run_coroutine_threadsafe(_send(payload), loop)
 
         try:
             with bind_tool_status_callback(tool_status_cb):
@@ -903,7 +915,7 @@ async def web_stream(ws: WebSocket):
                     ctx = contextvars.copy_context()
                     reply = await loop.run_in_executor(
                         _executor,
-                        lambda t=user_text: ctx.run(_graph_reply, t, session_id, user_id)
+                        lambda t=user_text, loc=latest_location: ctx.run(_graph_reply, t, session_id, user_id, loc)
                     )
             agent_text = reply["text"]
         except GraphRecursionError:
@@ -1084,6 +1096,25 @@ async def web_stream(ws: WebSocket):
 
                 await _send({"type": "transcript", "role": "user", "text": text_in})
                 await _run_turn(text_in)
+
+            elif msg_type == "location":
+                lat, lng = msg.get("lat"), msg.get("lng")
+                if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+                    latest_location = {
+                        "lat": lat,
+                        "lng": lng,
+                        "accuracy": msg.get("accuracy"),
+                        "ts": time.time(),
+                    }
+
+            elif msg_type == "checkpoint_ack":
+                # Button-tap confirmation — turned into a synthetic user turn so
+                # the exact same LLM judgment (incl. the GPS sanity-check in
+                # advance_map_trajectory's own instructions) governs both the
+                # voice and button confirmation paths; no special-cased logic here.
+                poi_name = msg.get("poiName") or "the checkpoint"
+                synthetic_text = f"[checkpoint confirmed via button: user reached {poi_name}]"
+                await _run_turn(synthetic_text)
 
     except WebSocketDisconnect:
         logger.info(f"Web stream disconnected: {session_id}")

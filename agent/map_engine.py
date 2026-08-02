@@ -22,6 +22,8 @@ _TYPE_PRIORITY = {
 
 PORTAL_COST = 0.5  # extra weight for a floor transition
 
+_PORTAL_TYPES = {"elevator", "escalator", "stairs"}
+
 
 def _poi_priority(poi: dict) -> int:
     return _TYPE_PRIORITY.get((poi.get("type") or "").lower(), 25)
@@ -227,7 +229,36 @@ def dijkstra_multilevel(levels: list[dict], start_poi_id: str, end_poi_id: str) 
         "poi_stops": poi_stops,
         "distance": dist.get(end_wp, 0),
         "level_changes": level_changes,
+        "segments": _build_segments(poi_stops),
     }
+
+
+def _build_segments(poi_stops: list[dict]) -> list[dict]:
+    """Group a flat poi_stops list into per-floor segments, in travel order.
+
+    Each segment's last stop is the portal (elevator/escalator/stairs) the
+    user takes to leave that floor — None on the final segment, since there's
+    nowhere further to go. Segments always cover every stop in poi_stops;
+    a single-level route yields exactly one segment with portal_out=None."""
+    segments: list[dict] = []
+    current: list[dict] = []
+    current_level = poi_stops[0].get("level_name", "") if poi_stops else ""
+
+    for s in poi_stops:
+        lvl = s.get("level_name", "")
+        if lvl != current_level and current:
+            segments.append({"level_name": current_level, "stops": current, "portal_out": None})
+            current = []
+            current_level = lvl
+        current.append(s)
+    if current:
+        segments.append({"level_name": current_level, "stops": current, "portal_out": None})
+
+    for i, seg in enumerate(segments):
+        if i < len(segments) - 1 and seg["stops"]:
+            seg["portal_out"] = seg["stops"][-1]
+
+    return segments
 
 
 # ---------------------------------------------------------------------------

@@ -63,9 +63,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Callable, Iterator, Optional
+from typing import Annotated, Callable, Iterator, Optional
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import InjectedToolCallId
+from langgraph.prebuilt import InjectedState
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent.config import DEFAULT_AIRPORT
@@ -326,6 +330,207 @@ def show_map_route(stops: list[str], stop_names: list[str]) -> str:
     return f"Route shown on map ({len(resolved)} stops)."
 
 
+# ---------------------------------------------------------------------------
+# Multi-level trajectory tools
+# ---------------------------------------------------------------------------
+
+def _resolve_trajectory_segments(raw: dict) -> list[dict]:
+    """Resolve GPS for every stop in raw['segments'] (from get_route), tagging
+    the one that's the elevator/escalator/stairs used to leave that floor."""
+    out_segments: list[dict] = []
+    for seg in raw.get("segments", []):
+        portal = seg.get("portal_out")
+        portal_id = portal["id"] if portal else None
+        stops: list[dict] = []
+        for s in seg.get("stops", []):
+            gps = _lookup_gps(s["id"])
+            if not gps:
+                continue
+            stops.append({
+                "id": s["id"],
+                "name": s["name"],
+                "lat": gps["lat"],
+                "lng": gps["lng"],
+                "kind": s.get("type") or "other",
+                "isPortal": portal_id is not None and s["id"] == portal_id,
+            })
+        out_segments.append({
+            "levelName": seg.get("level_name", ""),
+            "stops": stops,
+            "portalOut": next((s for s in stops if s["isPortal"]), None),
+        })
+    return out_segments
+
+
+def _emit_trajectory(raw: dict, route_id: str, active_idx: int) -> bool:
+    """Build and emit a show_trajectory map action. Returns False (and emits
+    nothing) if GPS coordinates couldn't be resolved for the endpoints."""
+    segments = _resolve_trajectory_segments(raw)
+    first_stops = segments[0]["stops"] if segments else []
+    last_stops = segments[-1]["stops"] if segments else []
+    if not first_stops or not last_stops:
+        return False
+
+    _emit({
+        "type": "show_trajectory",
+        "routeId": route_id,
+        "origin": {"name": first_stops[0]["name"], "lat": first_stops[0]["lat"], "lng": first_stops[0]["lng"]},
+        "destination": {"name": last_stops[-1]["name"], "lat": last_stops[-1]["lat"], "lng": last_stops[-1]["lng"]},
+        "segments": segments,
+        "activeSegmentIndex": active_idx,
+        "etaMinutes": raw.get("estimated_minutes"),
+    })
+    return True
+
+
+@tool
+def show_map_trajectory(state: Annotated[dict, InjectedState]) -> str:
+    """Show the full planned route on the user's map, floor by floor.
+
+    Call this once, right after get_route, whenever the route you just
+    planned crosses more than one level (get_route's spoken summary will
+    mention a "floor change"). It replaces show_map_directions/show_map_route
+    for multi-level trips — don't call those too for the same route.
+
+    The map will initially show only the CURRENT floor: the user's starting
+    point, the path to the elevator/escalator/stairs they need to take on
+    this floor, and that portal highlighted as the thing to look for. It will
+    NOT show later floors yet — the user hasn't gotten there. Once the user
+    confirms (via request_checkpoint_confirmation, then their reply or a
+    button tap) that they reached that portal, call advance_map_trajectory
+    to reveal the next floor's leg.
+
+    If the route is single-level, prefer show_map_directions instead —
+    calling this on a single-level route is harmless (it just shows the one
+    segment with no portal) but adds no value.
+    """
+    print("[map] show_trajectory")
+    raw = state.get("last_route")
+    if not raw or not raw.get("segments"):
+        return "No route is available yet — call get_route first."
+
+    route_id = state.get("route_id") or ""
+    active_idx = state.get("active_segment_index") or 0
+    if not _emit_trajectory(raw, route_id, active_idx):
+        return "GPS coordinates not available for this route yet."
+
+    n = len(raw["segments"])
+    return f"Trajectory shown on map ({n} floor{'s' if n != 1 else ''})."
+
+
+class RequestCheckpointInput(BaseModel):
+    prompt_text: str = Field(
+        description="Exactly what to say to the user to ask them to confirm "
+                     "they've reached the checkpoint. Write this yourself, in "
+                     "your own voice, based on the route — e.g. 'Let me know "
+                     "when you get to the elevator on your left, or just tap "
+                     "the button on screen.' Always mention both options: "
+                     "they can say so out loud, or tap the on-screen button."
+    )
+
+
+@tool(args_schema=RequestCheckpointInput)
+def request_checkpoint_confirmation(prompt_text: str, state: Annotated[dict, InjectedState]) -> str:
+    """Ask the user to confirm they've reached the current floor's portal
+    (elevator/escalator/stairs), and put a confirmation button on their
+    screen as a backup to speaking.
+
+    Call this once you've finished narrating the directions for the current
+    floor segment of a multi-level trajectory (after show_map_trajectory).
+    Say prompt_text yourself as your next reply — this tool also surfaces a
+    tappable button client-side so the user isn't required to speak. After
+    calling this, WAIT for the user's next turn (voice, or a system note that
+    they tapped the button) before calling advance_map_trajectory. Don't call
+    this if the current floor is the final segment (no portal to confirm).
+    """
+    print("[map] checkpoint_prompt")
+    raw = state.get("last_route")
+    active_idx = state.get("active_segment_index") or 0
+    route_id = state.get("route_id") or ""
+    if not raw or not raw.get("segments") or active_idx >= len(raw["segments"]):
+        return "No active multi-level route to request a checkpoint on."
+
+    seg = raw["segments"][active_idx]
+    portal = seg.get("portal_out")
+    if not portal:
+        return "The current floor is the final segment — there's no portal to confirm."
+
+    gps = _lookup_gps(portal["id"])
+    _emit({
+        "type": "checkpoint_prompt",
+        "routeId": route_id,
+        "segmentIndex": active_idx,
+        "poiName": portal["name"],
+        "promptText": prompt_text,
+        "gpsTarget": {"lat": gps["lat"], "lng": gps["lng"]} if gps else None,
+    })
+    return "Checkpoint confirmation requested — now say prompt_text to the user."
+
+
+class AdvanceTrajectoryInput(BaseModel):
+    reason: str = Field(
+        description="One short phrase for why you're advancing now, e.g. "
+                     "'user confirmed by voice' or 'user tapped the checkpoint "
+                     "button'. Logged only, not shown to the user."
+    )
+
+
+@tool(args_schema=AdvanceTrajectoryInput)
+def advance_map_trajectory(
+    reason: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[dict, InjectedState],
+) -> Command:
+    """Advance the on-screen trajectory to the next floor segment.
+
+    Only call this after the user has actually confirmed they reached the
+    current floor's portal — either they said so out loud, or a system note
+    told you they tapped the on-screen checkpoint button.
+
+    Before calling this, check CURRENT_USER_LOCATION (if available in
+    context) against the portal's coordinates from the route. If they're
+    implausibly far apart for someone who just said they arrived, don't call
+    this — ask the user to double check out loud instead (e.g. "Hmm, your
+    location's showing you might still be near security — are you sure
+    you're at the elevator?"). GPS drifts indoors, so use judgment: a
+    mismatch of a few dozen meters is normal, hundreds of meters is not.
+
+    If there is no next floor (the current segment is already the last
+    one), don't call this — call clear_map or just continue narrating
+    arrival instead.
+    """
+    print(f"[map] advance_trajectory ({reason})")
+    raw = state.get("last_route")
+    active_idx = state.get("active_segment_index") or 0
+    route_id = state.get("route_id") or ""
+
+    if not raw or not raw.get("segments"):
+        msg = ToolMessage(content="No active route to advance.", tool_call_id=tool_call_id)
+        return Command(update={"messages": [msg]})
+
+    next_idx = active_idx + 1
+    if next_idx >= len(raw["segments"]):
+        msg = ToolMessage(
+            content="Already on the final floor segment — nothing further to advance to.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
+
+    _emit_trajectory(raw, route_id, next_idx)
+    _emit({
+        "type": "checkpoint_resolved",
+        "routeId": route_id,
+        "segmentIndex": active_idx,
+        "nextSegmentIndex": next_idx,
+    })
+
+    msg = ToolMessage(
+        content=f"Advanced to floor {next_idx + 1} of {len(raw['segments'])}.",
+        tool_call_id=tool_call_id,
+    )
+    return Command(update={"messages": [msg], "active_segment_index": next_idx})
+
+
 @tool
 def clear_map() -> str:
     """Clear the map display.
@@ -337,4 +542,12 @@ def clear_map() -> str:
     return "Map cleared."
 
 
-MAP_TOOLS = [show_map_destination, show_map_directions, show_map_route, clear_map]
+MAP_TOOLS = [
+    show_map_destination,
+    show_map_directions,
+    show_map_route,
+    show_map_trajectory,
+    request_checkpoint_confirmation,
+    advance_map_trajectory,
+    clear_map,
+]

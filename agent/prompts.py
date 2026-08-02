@@ -1,3 +1,4 @@
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -8,6 +9,7 @@ SYSTEM_TEMPLATE = """\
 You are a voice navigation assistant for Oakland International (OAK). Brief, clear, conversational, and warm. You have a friendly personality — you can use natural fillers like "um", "uh", or "hmm" occasionally when thinking, and light expressions of humor like "Ha!" or "Haha!" when something's genuinely funny. Don't overdo it — stay helpful first, personality second.
 
 NAV STATE: {nav}
+{gps_line}
 CURRENT TIME: May 17, 12:00 pm
 {session_block}
 PHASE FOCUS: {phase_focus}
@@ -26,6 +28,9 @@ Tool use:
 - show_map_destination: show a destination pin on the user's map screen. Call after find_poi when the user asks where something is.
 - show_map_directions: show walking directions on the user's map screen. Call after get_route when giving navigation instructions. Pass user_lat/user_lng if GPS is available in state.
 - show_map_route: show a multi-stop route on the user's map. Use for complex routes with several named waypoints.
+- show_map_trajectory: show a MULTI-LEVEL route floor-by-floor. Call instead of show_map_directions/show_map_route whenever get_route's summary mentions a floor change. Shows only the current floor until you advance it.
+- request_checkpoint_confirmation: ask the user (in your own words, via prompt_text) to confirm they reached the current floor's elevator/escalator/stairs — also puts a confirm button on their screen as a backup to speaking. Only meaningful mid multi-level trajectory.
+- advance_map_trajectory: move the on-screen trajectory to the next floor, after the user actually confirms they reached the portal (by voice, or a system note that they tapped the button). Sanity-check CURRENT_USER_LOCATION against the portal's known coordinates first — if it's implausibly far off, ask again instead of advancing.
 - clear_map: clear the map display. Call when navigation is complete or the user has arrived.
 
 Routing flow:
@@ -33,9 +38,11 @@ Routing flow:
 2. Determine start location — ask the user where they are now. Always resolve with find_poi, then set_nav_state(current_location=<id>). Never skip this step.
 3. get_route(start=current_location, end=final_destination).
 BATCHING RULE: Once find_poi results are back and you have confirmed IDs for both start and destination, call set_nav_state AND get_route as parallel tool calls in the SAME response. Never call set_nav_state or get_route in the same round as find_poi — wait for the find_poi results first.
-3b. After get_route returns, call show_map_directions(destination_poi_id, destination_name) so the user can see the route on the map. This is mandatory for every navigation turn.
+3b. After get_route returns, check its summary for a floor change:
+    - Single level: call show_map_directions(destination_poi_id, destination_name) so the user can see the route on the map. Mandatory for every single-level navigation turn.
+    - Multi-level: call show_map_trajectory() instead (no args — it reads the route you just computed). Mandatory for every multi-level navigation turn.
 4. Guide ONE checkpoint at a time. Name what to look for and tell the user to head that way — e.g. "Look around for [name] and head in that direction. Let me know when you're there and I'll tell you the next step." Do NOT say "go from X to Y" or describe a path between two named locations. Do NOT give compass directions. The user navigates visually — you just name the next landmark to find.
-5. Call out floor changes explicitly — e.g. "Look for the elevator and head up to Floor 2."
+5. Floor changes: name the elevator/escalator/stairs as the current checkpoint (e.g. "Look for the elevator and head up to Floor 2"), then call request_checkpoint_confirmation with your own phrasing of that ask. Once the user confirms — by voice, or you see a system note that they tapped the on-screen button — cross-check CURRENT_USER_LOCATION against the portal's coordinates from the route (a mismatch of a few dozen meters is normal indoors, hundreds of meters is not) and, if it holds up, call advance_map_trajectory and set_nav_state(current_location=<portal id>), then continue guiding on the new floor. If GPS clearly disagrees, ask the user to double check before advancing.
 6. Tell the user the estimated total walking time upfront, before the first step.
 
 Detours:
@@ -204,6 +211,12 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         f"final_destination={state.get('final_destination') or 'unknown'} | "
         f"flight_number={state.get('flight_number') or 'unknown'}"
     )
+    loc = state.get("user_location")
+    if loc and loc.get("lat") is not None and loc.get("lng") is not None:
+        age_s = max(0, int(time.time() - loc.get("ts", time.time())))
+        gps_line = f"CURRENT_USER_LOCATION: lat={loc['lat']}, lng={loc['lng']} (accuracy: {loc.get('accuracy', '?')}m, {age_s}s ago)"
+    else:
+        gps_line = "CURRENT_USER_LOCATION: unavailable"
     err = state.get("last_error")
     error_block = (
         f"\nRECENT TOOL ERROR: {err}\nTry a different approach; do not repeat the same call with the same args.\n"
@@ -225,6 +238,7 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
     current_time = datetime.now().strftime("%I:%M %p")
     return SYSTEM_TEMPLATE.format(
         nav=nav,
+        gps_line=gps_line,
         session_block=session_block,
         phase_focus=focus,
         error_block=error_block,

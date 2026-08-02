@@ -54,7 +54,7 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "show_map_route": [],         # silent — map update, no filler needed
     "show_map_trajectory": [],    # silent — map update, no filler needed
     "request_checkpoint_confirmation": [],  # silent — the agent speaks prompt_text itself
-    "advance_map_trajectory": [], # silent — map update, no filler needed
+    "advance_checkpoint": [],     # silent — map update, no filler needed
     "clear_map": [],              # silent — map update, no filler needed
     "track_flight_changes": [
         "Setting up flight tracking for you.",
@@ -573,29 +573,33 @@ def _auto_emit_map_from_tools(state: State, result, log_messages: list) -> None:
         name, args = call
 
         if name == "get_route":
+            # Prefer the floor-by-floor trajectory — with every named POI
+            # along the way shown as a dot, not just the two endpoints —
+            # for every route, single-level or multi-level. Only single-level
+            # routes ever collapse to one segment; that's still strictly
+            # better than a flat two-point line since it shows the stops
+            # in between.
             raw = _extract_tool_state_update(result, "last_route")
-            if raw and raw.get("level_changes"):
-                # Multi-level route — show the floor-by-floor trajectory
-                # (current floor only) instead of a flat two-point line.
-                route_id = _extract_tool_state_update(result, "route_id") or ""
-                segments = _resolve_trajectory_segments(raw)
-                first_stops = segments[0]["stops"] if segments else []
-                last_stops = segments[-1]["stops"] if segments else []
-                if first_stops and last_stops:
-                    cb({
-                        "type": "show_trajectory",
-                        "routeId": route_id,
-                        "origin": {"name": first_stops[0]["name"], "lat": first_stops[0]["lat"], "lng": first_stops[0]["lng"]},
-                        "destination": {"name": last_stops[-1]["name"], "lat": last_stops[-1]["lat"], "lng": last_stops[-1]["lng"]},
-                        "segments": segments,
-                        "activeSegmentIndex": 0,
-                        "etaMinutes": raw.get("estimated_minutes"),
-                    })
+            route_id = _extract_tool_state_update(result, "route_id") or ""
+            segments = _resolve_trajectory_segments(raw) if raw else []
+            first_stops = segments[0]["stops"] if segments else []
+            last_stops = segments[-1]["stops"] if segments else []
+            if first_stops and last_stops:
+                cb({
+                    "type": "show_trajectory",
+                    "routeId": route_id,
+                    "origin": {"name": first_stops[0]["name"], "lat": first_stops[0]["lat"], "lng": first_stops[0]["lng"]},
+                    "destination": {"name": last_stops[-1]["name"], "lat": last_stops[-1]["lat"], "lng": last_stops[-1]["lng"]},
+                    "segments": segments,
+                    "activeSegmentIndex": 0,
+                    "etaMinutes": raw.get("estimated_minutes"),
+                })
                 continue
 
-            # Single-level (or GPS-lookup failed for the trajectory) — fall
-            # back to the flat directions line, re-deriving GPS from the tool
-            # call's own args since get_route's ToolMessage content is prose.
+            # GPS lookup failed for the trajectory (e.g. intermediate POIs
+            # unresolvable) — fall back to a flat directions line, re-deriving
+            # GPS from the tool call's own args since get_route's ToolMessage
+            # content is prose.
             start_gps = _lookup_gps(args.get("start", ""))
             end_gps = _lookup_gps(args.get("end", ""))
             if start_gps and end_gps:

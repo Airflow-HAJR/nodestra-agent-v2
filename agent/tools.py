@@ -186,6 +186,7 @@ def get_route(
         "messages": [msg],
         "last_route": raw,
         "active_segment_index": 0,
+        "active_stop_index": 1,
         "route_id": str(uuid.uuid4()),
     })
 

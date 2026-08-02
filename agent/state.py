@@ -19,4 +19,5 @@ class State(TypedDict):
     user_location: Optional[dict]  # {lat, lng, accuracy, ts} — latest GPS fix streamed from the client, if any
     last_route: Optional[dict]  # structured route dict from the most recent get_route call (stops/segments/level_changes)
     active_segment_index: Optional[int]  # which floor segment of last_route is currently shown on the map
+    active_stop_index: Optional[int]  # index of the next unconfirmed checkpoint within that segment's stops
     route_id: Optional[str]  # uuid identifying last_route, so checkpoint events can be matched to the right route

@@ -500,21 +500,17 @@ def request_checkpoint_confirmation(prompt_text: str, state: Annotated[dict, Inj
     return f"Checkpoint confirmation re-shown for {stop['name']} (stop #{stop_idx + 1}) — now say prompt_text to the user."
 
 
-class AdvanceCheckpointInput(BaseModel):
-    reason: str = Field(
-        description="One short phrase for why you're advancing now, e.g. "
-                     "'user confirmed by voice' or 'user tapped the checkpoint "
-                     "button'. Logged only, not shown to the user."
-    )
-
-
-@tool(args_schema=AdvanceCheckpointInput)
+@tool
 def advance_checkpoint(
     reason: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     state: Annotated[dict, InjectedState],
 ) -> Command:
     """Mark the current checkpoint reached and move on to the next one.
+
+    reason: one short phrase for why you're advancing now, e.g. 'user
+    confirmed by voice' or 'user tapped the checkpoint button'. Logged
+    only, not shown to the user.
 
     Only call this after the user has actually confirmed they reached the
     checkpoint you last asked about — either they said so out loud, or a

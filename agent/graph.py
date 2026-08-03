@@ -21,7 +21,7 @@ from agent.vector_memory import (
 )
 from agent.tools import TOOLS
 from agent.logger import log_event
-from agent.map_tools import _lookup_gps, _map_callback_var, _resolve_trajectory_segments
+from agent.map_tools import _emit_checkpoint_prompt, _emit_trajectory, _lookup_gps, _map_callback_var
 
 _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
     "get_route": [
@@ -574,26 +574,17 @@ def _auto_emit_map_from_tools(state: State, result, log_messages: list) -> None:
 
         if name == "get_route":
             # Prefer the floor-by-floor trajectory — with every named POI
-            # along the way shown as a dot, not just the two endpoints —
-            # for every route, single-level or multi-level. Only single-level
-            # routes ever collapse to one segment; that's still strictly
-            # better than a flat two-point line since it shows the stops
-            # in between.
+            # along the way shown as a numbered dot, not just the two
+            # endpoints — for every route, single-level or multi-level. Only
+            # single-level routes ever collapse to one segment; that's still
+            # strictly better than a flat two-point line since it shows the
+            # stops in between. Also auto-surface the first checkpoint's
+            # confirm button, so it appears whether or not the agent
+            # separately calls show_map_trajectory this turn.
             raw = _extract_tool_state_update(result, "last_route")
             route_id = _extract_tool_state_update(result, "route_id") or ""
-            segments = _resolve_trajectory_segments(raw) if raw else []
-            first_stops = segments[0]["stops"] if segments else []
-            last_stops = segments[-1]["stops"] if segments else []
-            if first_stops and last_stops:
-                cb({
-                    "type": "show_trajectory",
-                    "routeId": route_id,
-                    "origin": {"name": first_stops[0]["name"], "lat": first_stops[0]["lat"], "lng": first_stops[0]["lng"]},
-                    "destination": {"name": last_stops[-1]["name"], "lat": last_stops[-1]["lat"], "lng": last_stops[-1]["lng"]},
-                    "segments": segments,
-                    "activeSegmentIndex": 0,
-                    "etaMinutes": raw.get("estimated_minutes"),
-                })
+            if raw and _emit_trajectory(raw, route_id, 0, 1):
+                _emit_checkpoint_prompt(raw, route_id, 0, 1)
                 continue
 
             # GPS lookup failed for the trajectory (e.g. intermediate POIs

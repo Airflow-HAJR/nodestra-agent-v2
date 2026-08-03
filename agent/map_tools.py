@@ -532,9 +532,13 @@ def advance_checkpoint(
     changes floors, this also flips the map to the next floor's leg. This
     also automatically puts the confirmation button on screen for the NEW
     current checkpoint (no separate tool call needed) — the tool's return
-    value tells you its name and map number so you can mention it. If it
-    was the final stop (the destination itself), don't call this — the trip
-    is over; continue narrating arrival and call clear_map when appropriate.
+    value tells you its name and map number so you can mention it. It also
+    updates the user's remembered current_location itself using the
+    checkpoint's real POI id — you do NOT need to (and should not) call
+    set_nav_state for this; you don't actually have that id, only the name.
+    If it was the final stop (the destination itself), don't call this —
+    the trip is over; continue narrating arrival and call clear_map when
+    appropriate.
     """
     print(f"[map] advance_checkpoint ({reason})")
     raw = state.get("last_route")
@@ -554,6 +558,12 @@ def advance_checkpoint(
             tool_call_id=tool_call_id,
         )
         return Command(update={"messages": [msg]})
+
+    # The checkpoint just confirmed — its real POI id becomes the new
+    # current_location, set here (not by the agent, which only ever sees
+    # this stop's name/number, never its id) to avoid it having to guess.
+    confirmed_stop = seg["stops"][stop_idx]
+    confirmed_location_update = {"current_location": confirmed_stop["id"]}
 
     is_last_stop_of_segment = stop_idx == len(seg["stops"]) - 1
     is_last_segment = seg_idx == len(segments) - 1
@@ -580,11 +590,12 @@ def advance_checkpoint(
             "messages": [msg],
             "active_segment_index": next_seg_idx,
             "active_stop_index": 1,
+            **confirmed_location_update,
         })
 
     if is_last_stop_of_segment and is_last_segment:
         msg = ToolMessage(content="User has reached the final destination.", tool_call_id=tool_call_id)
-        return Command(update={"messages": [msg]})
+        return Command(update={"messages": [msg], **confirmed_location_update})
 
     # More stops remain on this same floor — every stop is already visible
     # as a dot (show_map_trajectory drew the whole segment up front), so no
@@ -605,7 +616,7 @@ def advance_checkpoint(
         content=f"Advanced to checkpoint {next_stop_idx + 1} of {len(seg['stops'])} on this floor.{note}",
         tool_call_id=tool_call_id,
     )
-    return Command(update={"messages": [msg], "active_stop_index": next_stop_idx})
+    return Command(update={"messages": [msg], "active_stop_index": next_stop_idx, **confirmed_location_update})
 
 
 @tool

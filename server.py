@@ -1107,23 +1107,6 @@ async def web_stream(ws: WebSocket):
                         "ts": time.time(),
                     }
 
-            elif msg_type == "checkpoint_ack":
-                # Button-tap confirmation — turned into a synthetic user turn so
-                # the exact same LLM judgment (incl. the GPS sanity-check in
-                # advance_checkpoint's own instructions) governs both the
-                # voice and button confirmation paths; no special-cased logic here.
-                poi_name = msg.get("poiName") or "the checkpoint"
-                synthetic_text = f"[checkpoint confirmed via button: user reached {poi_name}]"
-                await _run_turn(synthetic_text)
-
-            elif msg_type == "checkpoint_help":
-                # "Need help" tap — doesn't advance anything, just tells the
-                # agent (as a synthetic turn) the user is stuck at the current
-                # checkpoint so it can give more detail without losing their place.
-                poi_name = msg.get("poiName") or "the current checkpoint"
-                synthetic_text = f"[user tapped 'need help' — they can't find {poi_name}]"
-                await _run_turn(synthetic_text)
-
     except WebSocketDisconnect:
         logger.info(f"Web stream disconnected: {session_id}")
     except Exception as e:

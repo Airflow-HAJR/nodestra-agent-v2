@@ -47,7 +47,6 @@ from agent.config import (
     TWILIO_PHONE_NUMBER,
 )
 from agent.db import invalidate_map_cache, load_map_levels
-from agent.llm import build_llm
 from agent.prompts import LANGUAGE_NAMES
 from agent.graph import ITERATION_CAP, graph
 from agent.summarizer import summarize
@@ -782,51 +781,6 @@ def _detected_from_dg_result(m: Any) -> str | None:
     return None
 
 
-def _translate_texts(texts: list[str], target_code: str) -> list[str]:
-    """Translate a batch of strings in one LLM call.
-
-    Returns the originals unchanged on any failure — a half-translated history
-    is worse than one that simply didn't change, and this runs on a user
-    gesture where a hard error would be very visible.
-    """
-    target = LANGUAGE_NAMES.get(target_code)
-    if not target or not texts:
-        return texts
-    try:
-        payload = json.dumps(
-            [{"i": i, "t": t} for i, t in enumerate(texts)], ensure_ascii=False
-        )
-        prompt = (
-            f"Translate each `t` field into {target}. This is an airport voice "
-            f"assistant's conversation, so keep the tone spoken and natural. "
-            f"Leave proper nouns as they appear on airport signage untranslated: "
-            f"gate numbers, terminal names, airline names, and place names like "
-            f"'Escape Lounge'. Preserve the meaning exactly; do not add, drop, or "
-            f"answer anything.\n\n"
-            f"Reply with ONLY a JSON array of objects with the same `i` values "
-            f"and the translated `t`. No markdown fence, no commentary.\n\n"
-            f"{payload}"
-        )
-        raw = build_llm(fast=True).invoke([HumanMessage(content=prompt)]).content
-        if isinstance(raw, list):  # some providers return content blocks
-            raw = "".join(str(p) for p in raw)
-        raw = str(raw).strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1] if "```" in raw[3:] else raw[3:]
-            raw = raw.lstrip("json").strip()
-        items = json.loads(raw)
-        out = list(texts)
-        for item in items:
-            idx = item.get("i")
-            txt = item.get("t")
-            if isinstance(idx, int) and 0 <= idx < len(out) and isinstance(txt, str) and txt.strip():
-                out[idx] = txt
-        return out
-    except Exception as e:
-        logger.error(f"History translation to {target_code} failed: {e}")
-        return texts
-
-
 _GREETINGS = {
     "en": "Welcome to Oakland International Airport! I'm your AI guide. Ask me anything — gates, flights, restaurants, restrooms, or directions anywhere in the terminal.",
     "es": "¡Bienvenido al Aeropuerto Internacional de Oakland! Soy tu guía con inteligencia artificial. Pregúntame lo que necesites: puertas, vuelos, restaurantes, baños o cómo llegar a cualquier lugar de la terminal.",
@@ -892,6 +846,10 @@ async def web_stream(ws: WebSocket):
         nonlocal language
         language = _resolve_language()
     latest_location: dict | None = None  # {lat, lng, accuracy, ts} — most recent GPS fix from the client
+    # Last thing the user actually asked. A mid-reply language switch re-runs
+    # this so the answer is regenerated in the new language rather than
+    # translated out of the old one.
+    last_user_text: str | None = None
 
     # Per-utterance Deepgram live-streaming state (see audio_start/audio_chunk/audio_end below)
     dg_client = AsyncDeepgramClient(api_key=DEEPGRAM_API_KEY) if DEEPGRAM_API_KEY else None
@@ -1022,6 +980,8 @@ async def web_stream(ws: WebSocket):
 
     async def _run_turn(user_text: str) -> None:
         """Run the agent graph on already-transcribed text and speak the reply."""
+        nonlocal last_user_text
+        last_user_text = user_text
         await _send({"type": "status", "state": "thinking"})
 
         def tool_status_cb(tool_name: str) -> None:
@@ -1133,48 +1093,29 @@ async def web_stream(ws: WebSocket):
                     await _send({"type": "status", "state": "idle"})
 
             elif msg_type == "set_language":
-                # The user moved the language pill mid-conversation. Everything
-                # already on their screen has to follow, and the reply they were
-                # listening to has to start over in the new language — the client
-                # has already killed that audio locally by this point.
+                # The user moved the language pill mid-conversation. The client
+                # has already killed whatever audio was playing; if something
+                # was, the reply gets produced again in the new language.
+                #
+                # Produced, not translated: the agent generates directly in the
+                # target language, which reads better than machine-translating
+                # an English answer — and it re-runs the same user turn, so the
+                # answer stays true to what was actually asked.
                 selected_language = msg.get("language", "en")
                 detected_language = None
                 _sync_language()
                 logger.info(f"Web stream [{session_id}] language -> {selected_language} (effective {language})")
 
-                history = msg.get("history") or []
-                speak_id = msg.get("speakId")  # the agent turn that was playing, if any
-
-                # Under auto there's no target to translate into yet — the next
-                # thing the user says decides it. Leave the transcript alone.
-                translated: list[str] = [str(h.get("text", "")) for h in history]
-                if selected_language != AUTO_LANGUAGE and history:
-                    translated = await loop.run_in_executor(
-                        _executor, _translate_texts, translated, language
-                    )
-
-                # Always answered, even when nothing changed — the client holds
-                # a "translating…" state open until this lands, so staying
-                # silent on the auto/empty paths would wedge it there.
-                await _send({
-                    "type": "history_translated",
-                    "language": language,
-                    "messages": [
-                        {"id": h.get("id"), "text": t}
-                        for h, t in zip(history, translated)
-                    ],
-                })
-
-                # Re-speak the interrupted turn, now in the new language.
-                if speak_id:
-                    spoken = next(
-                        (t for h, t in zip(history, translated) if h.get("id") == speak_id),
-                        None,
-                    )
-                    if spoken:
-                        await _send({"type": "transcript", "role": "agent", "text": spoken})
+                if msg.get("resume"):
+                    if last_user_text:
+                        await _run_turn(last_user_text)
+                    else:
+                        # Nothing asked yet — the interrupted turn was the
+                        # opening greeting, so just say it again.
+                        greeting = _GREETINGS.get(language, _GREETINGS["en"])
+                        await _send({"type": "transcript", "role": "agent", "text": greeting})
                         await _send({"type": "status", "state": "speaking"})
-                        mp3_bytes = await _tts_mp3_bytes(spoken)
+                        mp3_bytes = await _tts_mp3_bytes(greeting)
                         if mp3_bytes:
                             await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
                         await _send({"type": "status", "state": "idle"})

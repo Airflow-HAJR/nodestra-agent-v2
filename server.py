@@ -47,6 +47,8 @@ from agent.config import (
     TWILIO_PHONE_NUMBER,
 )
 from agent.db import invalidate_map_cache, load_map_levels
+from agent.llm import build_llm
+from agent.prompts import LANGUAGE_NAMES
 from agent.graph import ITERATION_CAP, graph
 from agent.summarizer import summarize
 from agent import timing
@@ -742,6 +744,89 @@ async def twilio_stream(ws: WebSocket):
 # text, so it can't be produced by the "reply in their language" prompt rule —
 # it has to be written out per language. Re-sent whenever the language pill
 # changes, which doubles as audible confirmation that the switch took effect.
+AUTO_LANGUAGE = "auto"
+
+# Deepgram's multilingual mode. nova-3 detects and transcribes code-switched
+# speech under this single pseudo-code, and reports what it actually heard on
+# each result — which is what lets the UI follow the speaker instead of making
+# them pick from a menu first.
+_DEEPGRAM_MULTI = "multi"
+
+
+def _detected_from_dg_result(m: Any) -> str | None:
+    """Pull the language Deepgram heard out of a live result.
+
+    The field moved around between Deepgram models and SDK versions (per-result
+    `detected_language`, a per-alternative `languages` list under nova-3 multi,
+    or a per-word `language`), so check each shape rather than betting on one.
+    """
+    for obj, attr in (
+        (m, "detected_language"),
+        (getattr(m, "channel", None), "detected_language"),
+    ):
+        val = getattr(obj, attr, None) if obj is not None else None
+        if isinstance(val, str) and val:
+            return val.split("-")[0].lower()
+
+    alts = getattr(getattr(m, "channel", None), "alternatives", None) or []
+    for alt in alts:
+        langs = getattr(alt, "languages", None)
+        if langs:
+            first = langs[0]
+            if isinstance(first, str) and first:
+                return first.split("-")[0].lower()
+        for word in (getattr(alt, "words", None) or []):
+            wl = getattr(word, "language", None)
+            if isinstance(wl, str) and wl:
+                return wl.split("-")[0].lower()
+    return None
+
+
+def _translate_texts(texts: list[str], target_code: str) -> list[str]:
+    """Translate a batch of strings in one LLM call.
+
+    Returns the originals unchanged on any failure — a half-translated history
+    is worse than one that simply didn't change, and this runs on a user
+    gesture where a hard error would be very visible.
+    """
+    target = LANGUAGE_NAMES.get(target_code)
+    if not target or not texts:
+        return texts
+    try:
+        payload = json.dumps(
+            [{"i": i, "t": t} for i, t in enumerate(texts)], ensure_ascii=False
+        )
+        prompt = (
+            f"Translate each `t` field into {target}. This is an airport voice "
+            f"assistant's conversation, so keep the tone spoken and natural. "
+            f"Leave proper nouns as they appear on airport signage untranslated: "
+            f"gate numbers, terminal names, airline names, and place names like "
+            f"'Escape Lounge'. Preserve the meaning exactly; do not add, drop, or "
+            f"answer anything.\n\n"
+            f"Reply with ONLY a JSON array of objects with the same `i` values "
+            f"and the translated `t`. No markdown fence, no commentary.\n\n"
+            f"{payload}"
+        )
+        raw = build_llm(fast=True).invoke([HumanMessage(content=prompt)]).content
+        if isinstance(raw, list):  # some providers return content blocks
+            raw = "".join(str(p) for p in raw)
+        raw = str(raw).strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1] if "```" in raw[3:] else raw[3:]
+            raw = raw.lstrip("json").strip()
+        items = json.loads(raw)
+        out = list(texts)
+        for item in items:
+            idx = item.get("i")
+            txt = item.get("t")
+            if isinstance(idx, int) and 0 <= idx < len(out) and isinstance(txt, str) and txt.strip():
+                out[idx] = txt
+        return out
+    except Exception as e:
+        logger.error(f"History translation to {target_code} failed: {e}")
+        return texts
+
+
 _GREETINGS = {
     "en": "Welcome to Oakland International Airport! I'm your AI guide. Ask me anything — gates, flights, restaurants, restrooms, or directions anywhere in the terminal.",
     "es": "¡Bienvenido al Aeropuerto Internacional de Oakland! Soy tu guía con inteligencia artificial. Pregúntame lo que necesites: puertas, vuelos, restaurantes, baños o cómo llegar a cualquier lugar de la terminal.",
@@ -788,8 +873,24 @@ async def web_stream(ws: WebSocket):
 
     loop = asyncio.get_running_loop()
     session_id = str(uuid.uuid4())
+    # What the user picked in the pill — may be AUTO_LANGUAGE, in which case
+    # `detected_language` (whatever Deepgram last heard) is what everything
+    # downstream actually runs on. `language` below is always the effective
+    # one; the pick itself lives in `selected_language`.
+    selected_language = "en"
+    detected_language: str | None = None
     language = "en"
     user_id: str | None = None
+
+    def _resolve_language() -> str:
+        """Effective language: the explicit pick, or what we heard under auto."""
+        if selected_language == AUTO_LANGUAGE:
+            return detected_language or "en"
+        return selected_language
+
+    def _sync_language() -> None:
+        nonlocal language
+        language = _resolve_language()
     latest_location: dict | None = None  # {lat, lng, accuracy, ts} — most recent GPS fix from the client
 
     # Per-utterance Deepgram live-streaming state (see audio_start/audio_chunk/audio_end below)
@@ -807,6 +908,23 @@ async def web_stream(ws: WebSocket):
             await ws.send_json(msg)
         except Exception:
             pass
+
+    async def _apply_detected_language(code: str) -> None:
+        """Record what Deepgram heard, and tell the client when it changes.
+
+        Only meaningful under auto: with an explicit pick the user has said
+        what they want, and flipping languages out from under them because one
+        word sounded French would be worse than occasionally mis-hearing.
+        """
+        nonlocal detected_language
+        if selected_language != AUTO_LANGUAGE:
+            return
+        if code not in LANGUAGE_NAMES or code == detected_language:
+            return
+        detected_language = code
+        _sync_language()
+        logger.info(f"Web stream [{session_id}] auto-detected language: {code}")
+        await _send({"type": "language_detected", "language": code})
 
     async def _close_dg_socket() -> None:
         """Tear down any in-flight Deepgram live connection (best-effort)."""
@@ -832,12 +950,11 @@ async def web_stream(ws: WebSocket):
             mime_map = {"webm": "audio/webm", "ogg": "audio/ogg", "mp4": "audio/mp4"}
             mime = mime_map.get(fmt, "audio/webm")
 
-            lang_code = language if language not in ("auto", "") else None
             params: dict = {"model": "nova-3", "smart_format": "true", "punctuate": "true"}
-            if lang_code:
-                params["language"] = lang_code
+            if selected_language == AUTO_LANGUAGE:
+                params["language"] = _DEEPGRAM_MULTI
             else:
-                params["detect_language"] = "true"
+                params["language"] = language
 
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.post(
@@ -855,6 +972,9 @@ async def web_stream(ws: WebSocket):
             channels = data.get("results", {}).get("channels", [{}])
             alts = channels[0].get("alternatives", [{}])
             transcript = alts[0].get("transcript", "").strip()
+            heard = channels[0].get("detected_language") or (alts[0].get("languages") or [None])[0]
+            if isinstance(heard, str) and heard:
+                await _apply_detected_language(heard.split("-")[0].lower())
             logger.info(f"Deepgram transcript: '{transcript}'")
             return transcript or None
         except Exception as e:
@@ -963,6 +1083,10 @@ async def web_stream(ws: WebSocket):
             async for m in sock:
                 if getattr(m, "type", None) != "Results":
                     continue
+                heard = _detected_from_dg_result(m)
+                if heard:
+                    await _apply_detected_language(heard)
+
                 alt = m.channel.alternatives[0]
                 text = alt.transcript
                 if not text:
@@ -990,24 +1114,76 @@ async def web_stream(ws: WebSocket):
             msg_type = msg.get("type")
 
             if msg_type == "config":
-                language = msg.get("language", "en")
+                selected_language = msg.get("language", "en")
+                detected_language = None
+                _sync_language()
                 user_id = msg.get("userId") or user_id
-                logger.info(f"Web stream [{session_id}] config: lang={language} user={user_id}")
+                logger.info(f"Web stream [{session_id}] config: lang={selected_language} user={user_id}")
 
-                # Greet in whatever language is now selected. English is the
-                # fallback for "auto" and for any code without a translation.
-                greeting = _GREETINGS.get(language, _GREETINGS["en"])
-                await _send({"type": "transcript", "role": "agent", "text": greeting})
-                await _send({"type": "status", "state": "speaking"})
-                mp3_bytes = await _tts_mp3_bytes(greeting)
-                if mp3_bytes:
-                    await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
-                await _send({"type": "status", "state": "idle"})
+                # Only on a genuinely fresh session. A reconnect mid-conversation
+                # sends config too, and re-greeting there would talk over
+                # whatever the user was in the middle of.
+                if msg.get("greet", True):
+                    greeting = _GREETINGS.get(language, _GREETINGS["en"])
+                    await _send({"type": "transcript", "role": "agent", "text": greeting})
+                    await _send({"type": "status", "state": "speaking"})
+                    mp3_bytes = await _tts_mp3_bytes(greeting)
+                    if mp3_bytes:
+                        await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
+                    await _send({"type": "status", "state": "idle"})
+
+            elif msg_type == "set_language":
+                # The user moved the language pill mid-conversation. Everything
+                # already on their screen has to follow, and the reply they were
+                # listening to has to start over in the new language — the client
+                # has already killed that audio locally by this point.
+                selected_language = msg.get("language", "en")
+                detected_language = None
+                _sync_language()
+                logger.info(f"Web stream [{session_id}] language -> {selected_language} (effective {language})")
+
+                history = msg.get("history") or []
+                speak_id = msg.get("speakId")  # the agent turn that was playing, if any
+
+                # Under auto there's no target to translate into yet — the next
+                # thing the user says decides it. Leave the transcript alone.
+                translated: list[str] = [str(h.get("text", "")) for h in history]
+                if selected_language != AUTO_LANGUAGE and history:
+                    translated = await loop.run_in_executor(
+                        _executor, _translate_texts, translated, language
+                    )
+
+                # Always answered, even when nothing changed — the client holds
+                # a "translating…" state open until this lands, so staying
+                # silent on the auto/empty paths would wedge it there.
+                await _send({
+                    "type": "history_translated",
+                    "language": language,
+                    "messages": [
+                        {"id": h.get("id"), "text": t}
+                        for h, t in zip(history, translated)
+                    ],
+                })
+
+                # Re-speak the interrupted turn, now in the new language.
+                if speak_id:
+                    spoken = next(
+                        (t for h, t in zip(history, translated) if h.get("id") == speak_id),
+                        None,
+                    )
+                    if spoken:
+                        await _send({"type": "transcript", "role": "agent", "text": spoken})
+                        await _send({"type": "status", "state": "speaking"})
+                        mp3_bytes = await _tts_mp3_bytes(spoken)
+                        if mp3_bytes:
+                            await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
+                        await _send({"type": "status", "state": "idle"})
 
             elif msg_type == "audio":
                 audio_b64 = msg.get("data", "")
                 fmt = msg.get("format", "webm")
-                language = msg.get("language", language)
+                selected_language = msg.get("language", selected_language)
+                _sync_language()
 
                 if not audio_b64:
                     await _send({"type": "error", "message": "Empty audio data"})
@@ -1028,7 +1204,8 @@ async def web_stream(ws: WebSocket):
                 await _run_turn(transcript)
 
             elif msg_type == "audio_start":
-                language = msg.get("language", language)
+                selected_language = msg.get("language", selected_language)
+                _sync_language()
 
                 if dg_client is None:
                     await _send({"type": "error", "message": "Speech recognition is not configured."})
@@ -1041,7 +1218,7 @@ async def web_stream(ws: WebSocket):
                     interim_results=True,
                     punctuate=True,
                     smart_format=True,
-                    language=language if language not in ("auto", "") else None,
+                    language=_DEEPGRAM_MULTI if selected_language == AUTO_LANGUAGE else language,
                 )
                 try:
                     dg_socket = await dg_cm.__aenter__()
@@ -1112,7 +1289,8 @@ async def web_stream(ws: WebSocket):
 
             elif msg_type == "text":
                 text_in = (msg.get("text") or "").strip()
-                language = msg.get("language", language)
+                selected_language = msg.get("language", selected_language)
+                _sync_language()
 
                 if not text_in:
                     await _send({"type": "error", "message": "Empty text"})

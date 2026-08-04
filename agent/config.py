@@ -58,6 +58,51 @@ CARTESIA_EMOTION = os.environ.get("CARTESIA_EMOTION", "enthusiastic")
 # TTS provider: "elevenlabs" | "cartesia"
 TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
 
+# ── Per-language TTS voices ───────────────────────────────────────────────────
+# A Spanish reply read by an American voice sounds like an American reading
+# Spanish, so each language gets a voice native to it. These are Cartesia's
+# stock voices (all verified against sonic-3.5) — female "guide / support"
+# personas throughout so the agent keeps one character across languages and
+# only the accent changes.
+CARTESIA_VOICE_IDS: dict[str, str] = {
+    "en": "db6b0ed5-d5d3-463d-ae85-518a07d3c2b4",  # Skylar - Friendly Guide
+    "es": "db74bd0c-9ea6-4d08-b78e-c3c0a54dfd2d",  # Ines - Route Guide
+    "fr": "3b7d569e-01fc-45ef-b74b-29460956c691",  # Josette - Frontline Helper
+    "de": "0b66a153-548f-4f2c-b734-09a13b0bd163",  # Lorelei - Helpful Guide
+    "it": "0e21713a-5e9a-428a-bed4-90d410b87f13",  # Alessandra - Melodic Guide
+    "pt": "d4b44b9a-82bc-4b65-b456-763fce4c52f9",  # Beatriz - Support Guide
+    "ru": "25b7aaa6-1670-42dc-b791-419322400803",  # Daria - Decisive Dispatcher
+    "zh": "7a5d4663-88ae-47b7-808e-8f9b9ee4127b",  # Hua - Sunny Support
+    "ja": "d0ff6870-dd30-420d-8568-d756d806ea62",  # Hinata - Graceful Guide
+    "ko": "ce9ca2b6-2bed-4452-99bb-052e1ec0b534",  # Seoyun - Warm Guide
+    "ar": "731ace69-ee17-41bc-8c6f-665c9f1db95c",  # Fatima - Graceful Guide
+    "hi": "bec003e2-3cb3-429c-8468-206a393c67ad",  # Parvati - Friendly Supporter
+}
+
+# ElevenLabs equivalents. Only the languages this account actually has a
+# native-accent voice for are listed — the resolver falls through to Cartesia
+# for the rest rather than having an American voice read Japanese.
+ELEVENLABS_VOICE_IDS: dict[str, str] = {
+    "en": ELEVENLABS_VOICE_ID,
+    "es": "nfyTTmgO0f6GV9CKrMWL",  # Valeria — Latin American female
+    "hi": "dVTC43Yewy5fAIcmsISI",  # Anvi — Hindi female
+}
+
+
+def _voice_overrides(prefix: str, table: dict[str, str]) -> dict[str, str]:
+    """Let any single language be re-pointed from the environment, e.g.
+    CARTESIA_VOICE_ID_ES=... , without touching the table above."""
+    merged = dict(table)
+    for code in set(table) | set(CARTESIA_VOICE_IDS):
+        override = os.environ.get(f"{prefix}_{code.upper()}")
+        if override:
+            merged[code] = override.strip()
+    return merged
+
+
+CARTESIA_VOICE_IDS = _voice_overrides("CARTESIA_VOICE_ID", CARTESIA_VOICE_IDS)
+ELEVENLABS_VOICE_IDS = _voice_overrides("ELEVENLABS_VOICE_ID", ELEVENLABS_VOICE_IDS)
+
 # GateGetter service URL (flight tracking)
 GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
 

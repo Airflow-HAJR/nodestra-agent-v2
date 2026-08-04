@@ -35,10 +35,12 @@ from agent.config import (
     CARTESIA_EMOTION,
     CARTESIA_MODEL_ID,
     CARTESIA_VOICE_ID,
+    CARTESIA_VOICE_IDS,
     DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
+    ELEVENLABS_VOICE_IDS,
     GATEGETTER_URL,
     SERVER_BASE_URL,
     TTS_PROVIDER,
@@ -119,6 +121,37 @@ _twilio = (
 _validator = RequestValidator(TWILIO_AUTH_TOKEN) if TWILIO_AUTH_TOKEN else None
 _eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
 
+# ── Voice selection ───────────────────────────────────────────────────────────
+
+
+def _norm_lang(lang: str | None) -> str:
+    """'es-419' / 'ES' / None → 'es' / 'en'. Deepgram, the graph and the client
+    all use bare two-letter codes; this is the one place regional tags die."""
+    code = (lang or "en").split("-")[0].strip().lower()
+    return code or "en"
+
+
+def _voice_for(lang: str | None) -> tuple[str, str]:
+    """Return (provider, voice_id) for speaking `lang`.
+
+    A reply in Spanish read by an American voice sounds like an American
+    reading Spanish, so a voice native to the language wins over staying on the
+    configured provider: TTS_PROVIDER is tried first, but if it has no voice
+    for this language and the other provider does, the other provider takes the
+    turn. Only when neither has one do we fall back to a default voice.
+    """
+    code = _norm_lang(lang)
+    order = ("elevenlabs", "cartesia") if TTS_PROVIDER == "elevenlabs" else ("cartesia", "elevenlabs")
+    for provider in order:
+        if provider == "elevenlabs" and _eleven and ELEVENLABS_VOICE_IDS.get(code):
+            return "elevenlabs", ELEVENLABS_VOICE_IDS[code]
+        if provider == "cartesia" and CARTESIA_API_KEY and CARTESIA_VOICE_IDS.get(code):
+            return "cartesia", CARTESIA_VOICE_IDS[code]
+    if TTS_PROVIDER == "elevenlabs" and _eleven:
+        return "elevenlabs", ELEVENLABS_VOICE_ID
+    return "cartesia", CARTESIA_VOICE_ID
+
+
 # ── ElevenLabs TTS ────────────────────────────────────────────────────────────
 
 _FALLBACK_VOICE = "Polly.Joanna"
@@ -151,35 +184,49 @@ async def serve_audio(token: str):
     return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
-def _elevenlabs_tts_mp3_url(text: str) -> str | None:
+def _elevenlabs_tts_bytes(text: str, lang: str, output_format: str, voice_id: str) -> bytes:
+    """Synthesize `text` with ElevenLabs and return the raw audio bytes.
+
+    language_code pins the model to the language we intend rather than letting
+    it guess from the text — short replies ("Gate B12.") read identically in
+    several languages and would otherwise get an arbitrary accent.
+    """
+    return b"".join(
+        _eleven.text_to_speech.convert(
+            voice_id=voice_id,
+            text=text,
+            model_id="eleven_flash_v2_5",
+            output_format=output_format,
+            language_code=_norm_lang(lang),
+        )
+    )
+
+
+def _elevenlabs_tts_mp3_url(text: str, lang: str = "en", voice_id: str | None = None) -> str | None:
     """Generate ElevenLabs MP3, cache it, return a /audio/{token} URL for TwiML <Play>."""
-    if not _eleven or not ELEVENLABS_VOICE_ID:
+    voice_id = voice_id or ELEVENLABS_VOICE_ID
+    if not _eleven or not voice_id:
         return None
     try:
-        audio_bytes = b"".join(
-            _eleven.text_to_speech.convert(
-                voice_id=ELEVENLABS_VOICE_ID,
-                text=text,
-                model_id="eleven_flash_v2_5",
-                output_format="mp3_44100_128",
-            )
-        )
+        audio_bytes = _elevenlabs_tts_bytes(text, lang, "mp3_44100_128", voice_id)
         return f"{SERVER_BASE_URL}/audio/{_store_audio(audio_bytes)}"
     except Exception as e:
         logger.error(f"ElevenLabs TTS (mp3) failed: {e}")
         return None
 
 
-def _elevenlabs_tts_mulaw_iter(text: str):
+def _elevenlabs_tts_mulaw_iter(text: str, lang: str = "en", voice_id: str | None = None):
     """Yield ElevenLabs mulaw 8 kHz chunks as they are generated."""
-    if not _eleven or not ELEVENLABS_VOICE_ID:
+    voice_id = voice_id or ELEVENLABS_VOICE_ID
+    if not _eleven or not voice_id:
         return iter([])
     try:
         return _eleven.text_to_speech.convert(
-            voice_id=ELEVENLABS_VOICE_ID,
+            voice_id=voice_id,
             text=text,
             model_id="eleven_flash_v2_5",
             output_format="ulaw_8000",
+            language_code=_norm_lang(lang),
         )
     except Exception as e:
         logger.error(f"ElevenLabs TTS (mulaw) failed: {e}")
@@ -195,7 +242,24 @@ _CARTESIA_HEADERS = {
 }
 
 
-def _cartesia_tts_mp3_url(text: str) -> str | None:
+def _cartesia_payload(text: str, lang: str, output_format: dict, voice_id: str) -> dict:
+    """Body for a Cartesia /tts/bytes call.
+
+    generation_config only accepts `emotion` — sending anything else (a `speed`
+    key, notably) is rejected wholesale as "invalid JSON", so keep this the one
+    place the body is built rather than hand-rolling it per call site.
+    """
+    return {
+        "model_id": CARTESIA_MODEL_ID,
+        "transcript": text,
+        "voice": {"mode": "id", "id": voice_id},
+        "output_format": output_format,
+        "language": _norm_lang(lang),
+        "generation_config": {"emotion": CARTESIA_EMOTION},
+    }
+
+
+def _cartesia_tts_mp3_url(text: str, lang: str = "en", voice_id: str | None = None) -> str | None:
     """Generate Cartesia MP3, cache it, return a /audio/{token} URL for TwiML <Play>."""
     if not CARTESIA_API_KEY:
         return None
@@ -203,14 +267,11 @@ def _cartesia_tts_mp3_url(text: str) -> str | None:
         resp = _requests.post(
             _CARTESIA_URL,
             headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
-            json={
-                "model_id": CARTESIA_MODEL_ID,
-                "transcript": text,
-                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
-                "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
-                "language": "en",
-                "generation_config": {"emotion": CARTESIA_EMOTION},
-            },
+            json=_cartesia_payload(
+                text, lang,
+                {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+                voice_id or CARTESIA_VOICE_ID,
+            ),
             timeout=10,
         )
         resp.raise_for_status()
@@ -220,7 +281,7 @@ def _cartesia_tts_mp3_url(text: str) -> str | None:
         return None
 
 
-def _cartesia_tts_mulaw_iter(text: str):
+def _cartesia_tts_mulaw_iter(text: str, lang: str = "en", voice_id: str | None = None):
     """Fetch Cartesia mulaw 8 kHz audio and yield it as a single chunk."""
     if not CARTESIA_API_KEY:
         return iter([])
@@ -228,14 +289,11 @@ def _cartesia_tts_mulaw_iter(text: str):
         resp = _requests.post(
             _CARTESIA_URL,
             headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
-            json={
-                "model_id": CARTESIA_MODEL_ID,
-                "transcript": text,
-                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
-                "output_format": {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
-                "language": "en",
-                "generation_config": {"emotion": CARTESIA_EMOTION},
-            },
+            json=_cartesia_payload(
+                text, lang,
+                {"container": "raw", "encoding": "pcm_mulaw", "sample_rate": 8000},
+                voice_id or CARTESIA_VOICE_ID,
+            ),
             timeout=15,
         )
         resp.raise_for_status()
@@ -247,16 +305,18 @@ def _cartesia_tts_mulaw_iter(text: str):
 
 # ── TTS dispatch ──────────────────────────────────────────────────────────────
 
-def _tts_mp3_url(text: str) -> str | None:
-    if TTS_PROVIDER == "cartesia":
-        return _cartesia_tts_mp3_url(text)
-    return _elevenlabs_tts_mp3_url(text)
+def _tts_mp3_url(text: str, lang: str = "en") -> str | None:
+    provider, voice_id = _voice_for(lang)
+    if provider == "cartesia":
+        return _cartesia_tts_mp3_url(text, lang, voice_id)
+    return _elevenlabs_tts_mp3_url(text, lang, voice_id)
 
 
-def _tts_mulaw_iter(text: str):
-    if TTS_PROVIDER == "cartesia":
-        return _cartesia_tts_mulaw_iter(text)
-    return _elevenlabs_tts_mulaw_iter(text)
+def _tts_mulaw_iter(text: str, lang: str = "en"):
+    provider, voice_id = _voice_for(lang)
+    if provider == "cartesia":
+        return _cartesia_tts_mulaw_iter(text, lang, voice_id)
+    return _elevenlabs_tts_mulaw_iter(text, lang, voice_id)
 
 
 # ── Request deduplication ─────────────────────────────────────────────────────
@@ -751,6 +811,20 @@ AUTO_LANGUAGE = "auto"
 # them pick from a menu first.
 _DEEPGRAM_MULTI = "multi"
 
+# How long to let Deepgram chew on the last chunks the browser sent before
+# asking it to finalize. Without this the flush races the audio still in the
+# decoder and the last few words of the sentence never make it into a result.
+_DG_SETTLE_BEFORE_FINALIZE_S = 0.35
+
+# Vocabulary the model would otherwise render phonetically ("gate bee twelve",
+# "T. S. A. pre check"). nova-3 keyterm prompting, English only.
+_DEEPGRAM_KEYTERMS = [
+    "gate", "terminal", "concourse", "boarding pass", "baggage claim",
+    "TSA PreCheck", "Clear", "security checkpoint", "departures", "arrivals",
+    "layover", "connecting flight", "boarding time", "restroom", "lounge",
+    "Oakland International Airport", "OAK", "rideshare", "BART", "AirTrain",
+]
+
 
 def _detected_from_dg_result(m: Any) -> str | None:
     """Pull the language Deepgram heard out of a live result.
@@ -858,6 +932,11 @@ async def web_stream(ws: WebSocket):
     dg_recv_task: asyncio.Task | None = None
     dg_final_holder: dict | None = None
     dg_final_event: asyncio.Event | None = None
+    # Bumped on every audio_start and stamped onto each partial_transcript, so
+    # a result that arrives late — after the client has already committed the
+    # previous utterance to the conversation — can be recognised as stale and
+    # dropped instead of overwriting the caption with the last turn's words.
+    utterance_seq = 0
 
     logger.info(f"Web stream connected: {session_id}")
 
@@ -908,11 +987,16 @@ async def web_stream(ws: WebSocket):
             mime_map = {"webm": "audio/webm", "ogg": "audio/ogg", "mp4": "audio/mp4"}
             mime = mime_map.get(fmt, "audio/webm")
 
-            params: dict = {"model": "nova-3", "smart_format": "true", "punctuate": "true"}
+            params: dict = {
+                "model": "nova-3", "smart_format": "true",
+                "punctuate": "true", "numerals": "true",
+            }
             if selected_language == AUTO_LANGUAGE:
                 params["language"] = _DEEPGRAM_MULTI
             else:
                 params["language"] = language
+            if params["language"] == "en":
+                params["keyterm"] = _DEEPGRAM_KEYTERMS  # nova-3 English-only
 
             async with httpx.AsyncClient(timeout=20) as client:
                 resp = await client.post(
@@ -939,43 +1023,37 @@ async def web_stream(ws: WebSocket):
             logger.error(f"Deepgram transcription failed: {e}")
             return None
 
-    async def _tts_mp3_bytes(text: str) -> bytes | None:
-        """Generate MP3 bytes using configured TTS provider."""
+    async def _tts_mp3_bytes(text: str, lang: str | None = None) -> bytes | None:
+        """Generate MP3 bytes in the voice that matches `lang`.
+
+        Voice selection (and thus accent) follows the language being spoken,
+        not the session's configured provider — see _voice_for.
+        """
+        spoken = _norm_lang(lang or language)
+        provider, voice_id = _voice_for(spoken)
         try:
-            if TTS_PROVIDER == "elevenlabs" and _eleven and ELEVENLABS_VOICE_ID:
-                audio_bytes = b"".join(
-                    await loop.run_in_executor(
-                        _executor,
-                        lambda: list(_eleven.text_to_speech.convert(
-                            voice_id=ELEVENLABS_VOICE_ID,
-                            text=text,
-                            model_id="eleven_flash_v2_5",
-                            output_format="mp3_44100_128",
-                        ))
-                    )
-                )
-                return audio_bytes
-            elif CARTESIA_API_KEY:
-                resp = await loop.run_in_executor(
+            if provider == "elevenlabs":
+                return await loop.run_in_executor(
                     _executor,
-                    lambda: _requests.post(
-                        _CARTESIA_URL,
-                        headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
-                        json={
-                            "model_id": CARTESIA_MODEL_ID,
-                            "transcript": text,
-                            "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
-                            "output_format": {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
-                            "language": language if len(language) == 2 else "en",
-                            "generation_config": {"emotion": CARTESIA_EMOTION, "speed": "fast"},
-                        },
-                        timeout=15,
-                    )
+                    lambda: _elevenlabs_tts_bytes(text, spoken, "mp3_44100_128", voice_id),
                 )
-                resp.raise_for_status()
-                return resp.content
+            resp = await loop.run_in_executor(
+                _executor,
+                lambda: _requests.post(
+                    _CARTESIA_URL,
+                    headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
+                    json=_cartesia_payload(
+                        text, spoken,
+                        {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+                        voice_id,
+                    ),
+                    timeout=15,
+                )
+            )
+            resp.raise_for_status()
+            return resp.content
         except Exception as e:
-            logger.error(f"TTS failed: {e}")
+            logger.error(f"TTS failed [{spoken} via {provider}]: {e}")
         return None
 
     async def _run_turn(user_text: str) -> None:
@@ -1030,7 +1108,10 @@ async def web_stream(ws: WebSocket):
         await _send({"type": "transcript", "role": "agent", "text": agent_text})
 
         await _send({"type": "status", "state": "speaking"})
-        mp3_bytes = await _tts_mp3_bytes(agent_text)
+        # `language` is captured now rather than read inside _tts_mp3_bytes: an
+        # auto-detect update landing between the graph reply and the synthesis
+        # would otherwise speak this turn's text in the next turn's voice.
+        mp3_bytes = await _tts_mp3_bytes(agent_text, language)
         if mp3_bytes:
             await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
 
@@ -1038,7 +1119,23 @@ async def web_stream(ws: WebSocket):
 
     async def _dg_receiver(sock, holder: dict, done: asyncio.Event) -> None:
         """Relay Deepgram live results back to the client as partial_transcript
-        messages, accumulating finalized fragments into `holder["text"]`."""
+        messages, accumulating finalized fragments into `holder["text"]`.
+
+        Two things this deliberately does not do:
+
+        * It doesn't treat `speech_final` as "the utterance is over". Deepgram
+          fires that at its own endpointing, several times inside one spoken
+          turn — waiting on it in audio_end below returned instantly on an
+          already-set event and cut off whatever the user said after the last
+          pause. Only a result flagged `from_finalize` (the reply to our own
+          Finalize) actually means everything sent has been transcribed.
+        * It doesn't try to make the interim text monotonic. Deepgram revises
+          its hypothesis, and the revision is the better transcript — "in a
+          coffee shop near" becoming "and a coffee shop nearby." is a
+          correction, not a glitch. `seq` lets the client drop results that
+          belong to an utterance it has already finalized, which is the real
+          problem the old length check was standing in for.
+        """
         try:
             async for m in sock:
                 if getattr(m, "type", None) != "Results":
@@ -1047,21 +1144,33 @@ async def web_stream(ws: WebSocket):
                 if heard:
                     await _apply_detected_language(heard)
 
+                from_finalize = bool(getattr(m, "from_finalize", False))
                 alt = m.channel.alternatives[0]
                 text = alt.transcript
                 if not text:
-                    if m.speech_final:
+                    if from_finalize:
                         done.set()
                     continue
 
                 if m.is_final:
                     holder["text"] = f"{holder['text']} {text}".strip()
-                    await _send({"type": "partial_transcript", "text": holder["text"], "final": bool(m.speech_final)})
-                    if m.speech_final:
+                    holder["pending"] = False
+                    await _send({
+                        "type": "partial_transcript",
+                        "text": holder["text"],
+                        "final": from_finalize,
+                        "seq": holder["seq"],
+                    })
+                    if from_finalize:
                         done.set()
                 else:
                     preview = f"{holder['text']} {text}".strip()
-                    await _send({"type": "partial_transcript", "text": preview, "final": False})
+                    await _send({
+                        "type": "partial_transcript",
+                        "text": preview,
+                        "final": False,
+                        "seq": holder["seq"],
+                    })
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -1154,13 +1263,28 @@ async def web_stream(ws: WebSocket):
 
                 await _close_dg_socket()  # safety net if a previous utterance wasn't cleanly closed
 
-                dg_cm = dg_client.listen.v1.connect(
-                    model="nova-3",
-                    interim_results=True,
-                    punctuate=True,
-                    smart_format=True,
-                    language=_DEEPGRAM_MULTI if selected_language == AUTO_LANGUAGE else language,
-                )
+                dg_lang = _DEEPGRAM_MULTI if selected_language == AUTO_LANGUAGE else language
+                dg_kwargs: dict = {
+                    "model": "nova-3",
+                    "interim_results": True,
+                    "punctuate": True,
+                    "smart_format": True,
+                    "language": dg_lang,
+                    # Numbers as digits: "gate B twelve" → "Gate B12", which is
+                    # what the map lookup actually matches on.
+                    "numerals": True,
+                    # Deepgram's own endpointing, on top of the browser's VAD.
+                    # Belt and braces: whichever notices the pause first, the
+                    # transcript is already segmented sensibly.
+                    "endpointing": 400,
+                    "vad_events": True,
+                }
+                # Keyterm prompting is nova-3 English-only; it's what stops
+                # airport vocabulary from being transcribed phonetically.
+                if dg_lang == "en":
+                    dg_kwargs["keyterm"] = _DEEPGRAM_KEYTERMS
+
+                dg_cm = dg_client.listen.v1.connect(**dg_kwargs)
                 try:
                     dg_socket = await dg_cm.__aenter__()
                 except Exception as e:
@@ -1175,13 +1299,19 @@ async def web_stream(ws: WebSocket):
                     await _send({"type": "status", "state": "idle"})
                     continue
 
-                dg_final_holder = {"text": ""}
+                utterance_seq += 1
+                # `pending` tracks whether audio has been sent that Deepgram
+                # hasn't finalized yet — audio_end uses it to skip the flush
+                # wait when there's demonstrably nothing left in flight.
+                dg_final_holder = {"text": "", "seq": utterance_seq, "pending": False}
                 dg_final_event = asyncio.Event()
                 dg_recv_task = asyncio.create_task(_dg_receiver(dg_socket, dg_final_holder, dg_final_event))
 
             elif msg_type == "audio_chunk":
                 chunk_b64 = msg.get("data", "")
                 if dg_socket is not None and chunk_b64:
+                    if dg_final_holder is not None:
+                        dg_final_holder["pending"] = True
                     try:
                         await dg_socket.send_media(base64.b64decode(chunk_b64))
                     except Exception as e:
@@ -1205,19 +1335,37 @@ async def web_stream(ws: WebSocket):
                     continue
 
                 try:
+                    # The last chunks the browser sent are still working their
+                    # way through Deepgram's decoder; finalizing the instant
+                    # they land drops the tail of the sentence. A short settle
+                    # gives them time to become results first.
+                    if (dg_final_holder or {}).get("pending"):
+                        await asyncio.sleep(_DG_SETTLE_BEFORE_FINALIZE_S)
                     await dg_socket.send_finalize()
                     if dg_final_event is not None:
                         try:
                             await asyncio.wait_for(dg_final_event.wait(), timeout=3.0)
                         except asyncio.TimeoutError:
-                            pass
+                            logger.warning(f"Deepgram finalize timed out [{session_id}] — using partial text")
                 except Exception as e:
                     logger.error(f"Deepgram finalize failed [{session_id}]: {e}")
 
                 transcript = (dg_final_holder or {}).get("text", "").strip()
+                finished_seq = (dg_final_holder or {}).get("seq")
                 await _close_dg_socket()
                 dg_final_holder = None
                 dg_final_event = None
+
+                # Tell the client this utterance is closed, with the exact text
+                # about to enter the conversation — whatever interim it was
+                # showing under the orb gets replaced by this, so the caption
+                # and the history can't disagree.
+                await _send({
+                    "type": "partial_transcript",
+                    "text": transcript,
+                    "final": True,
+                    "seq": finished_seq,
+                })
 
                 if not transcript:
                     await _send({"type": "error", "message": "Could not understand audio. Please try again."})

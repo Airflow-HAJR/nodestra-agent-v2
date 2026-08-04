@@ -56,7 +56,31 @@ CARTESIA_MODEL_ID = os.environ.get("CARTESIA_MODEL_ID", "sonic-3.5")
 CARTESIA_EMOTION = os.environ.get("CARTESIA_EMOTION", "enthusiastic")
 
 # TTS provider: "elevenlabs" | "cartesia"
-TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "cartesia")
+#
+# ElevenLabs by default because its model is multilingual on a single voice:
+# one voice id speaks all twelve UI languages when language_code pins the
+# language, so the traveler hears the same guide whichever one they switch to.
+# It is also the only provider whose voice exposes an expressiveness control
+# (Cartesia has speed, but its `emotion` field accepts any string at all
+# without validation, so there is nothing there to build a slider on).
+TTS_PROVIDER = os.environ.get("TTS_PROVIDER", "elevenlabs")
+
+# ── Voice tuning ──
+# What the traveler can move in the settings sheet, and the bounds the server
+# clamps to no matter what a client sends.
+#
+# The speed range is the intersection of the two providers' own limits —
+# ElevenLabs accepts 0.7–1.2 and rejects anything outside it, Cartesia accepts
+# 0.6–1.5 — so a single slider means the same thing on both and can never
+# produce a 400 by drifting out of range.
+VOICE_SPEED_MIN = 0.7
+VOICE_SPEED_MAX = 1.2
+VOICE_SPEED_DEFAULT = 1.0
+
+# Expressiveness is the slider; ElevenLabs' knob is `stability`, which runs the
+# other way (high stability = flat and even). The two are mirrored at the point
+# of use so the UI can say "lively" where the API says 0.
+VOICE_EXPRESSIVENESS_DEFAULT = 0.5
 
 # ── Per-language TTS voices ───────────────────────────────────────────────────
 # A Spanish reply read by an American voice sounds like an American reading

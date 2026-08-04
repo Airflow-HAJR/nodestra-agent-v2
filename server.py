@@ -17,6 +17,7 @@ import requests as _requests
 from deepgram import AsyncDeepgramClient
 from deepgram.listen.v2.types.listen_v2turn_info import ListenV2TurnInfo
 from elevenlabs import ElevenLabs
+from elevenlabs.types import VoiceSettings
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
@@ -49,7 +50,9 @@ from agent.config import (
     TWILIO_ACCOUNT_SID,
     TWILIO_AUTH_TOKEN,
     TWILIO_PHONE_NUMBER,
+    VOICE_SPEED_DEFAULT,
 )
+from agent.voice_tuning import DEFAULT_TUNING, VoiceTuning
 from agent.db import invalidate_map_cache, load_map_levels
 from agent.prompts import LANGUAGE_NAMES
 from agent.graph import ITERATION_CAP, graph
@@ -137,20 +140,30 @@ def _voice_for(lang: str | None) -> tuple[str, str]:
     """Return (provider, voice_id) for speaking `lang`.
 
     A reply in Spanish read by an American voice sounds like an American
-    reading Spanish, so a voice native to the language wins over staying on the
-    configured provider: TTS_PROVIDER is tried first, but if it has no voice
-    for this language and the other provider does, the other provider takes the
-    turn. Only when neither has one do we fall back to a default voice.
+    reading Spanish, so a voice native to the language wins where we have one:
+    ELEVENLABS_VOICE_IDS / CARTESIA_VOICE_IDS are consulted first.
+
+    Where we don't, ElevenLabs still answers rather than handing the language
+    to the other provider. Its model is multilingual on a single voice — the
+    default voice speaks all twelve languages once language_code pins one — so
+    a traveler switching from English to French keeps the same guide instead of
+    meeting a different one. That also keeps every language on the provider
+    whose voice the settings sliders can actually steer.
+
+    Cartesia remains the fallback for a deployment with no ElevenLabs key.
     """
     code = _norm_lang(lang)
-    order = ("elevenlabs", "cartesia") if TTS_PROVIDER == "elevenlabs" else ("cartesia", "elevenlabs")
-    for provider in order:
-        if provider == "elevenlabs" and _eleven and ELEVENLABS_VOICE_IDS.get(code):
-            return "elevenlabs", ELEVENLABS_VOICE_IDS[code]
-        if provider == "cartesia" and CARTESIA_API_KEY and CARTESIA_VOICE_IDS.get(code):
-            return "cartesia", CARTESIA_VOICE_IDS[code]
-    if TTS_PROVIDER == "elevenlabs" and _eleven:
-        return "elevenlabs", ELEVENLABS_VOICE_ID
+    eleven_ready = bool(_eleven and ELEVENLABS_VOICE_ID)
+    cartesia_ready = bool(CARTESIA_API_KEY and CARTESIA_VOICE_ID)
+
+    # `.get(code) or <default>` is the whole "native voice where we have one,
+    # the multilingual default everywhere else" rule.
+    if TTS_PROVIDER == "elevenlabs" and eleven_ready:
+        return "elevenlabs", ELEVENLABS_VOICE_IDS.get(code) or ELEVENLABS_VOICE_ID
+    if cartesia_ready:
+        return "cartesia", CARTESIA_VOICE_IDS.get(code) or CARTESIA_VOICE_ID
+    if eleven_ready:
+        return "elevenlabs", ELEVENLABS_VOICE_IDS.get(code) or ELEVENLABS_VOICE_ID
     return "cartesia", CARTESIA_VOICE_ID
 
 
@@ -186,13 +199,32 @@ async def serve_audio(token: str):
     return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
-def _elevenlabs_tts_bytes(text: str, lang: str, output_format: str, voice_id: str) -> bytes:
+def _elevenlabs_tts_bytes(
+    text: str,
+    lang: str,
+    output_format: str,
+    voice_id: str,
+    tuning: VoiceTuning = DEFAULT_TUNING,
+) -> bytes:
     """Synthesize `text` with ElevenLabs and return the raw audio bytes.
 
-    language_code pins the model to the language we intend rather than letting
-    it guess from the text — short replies ("Gate B12.") read identically in
-    several languages and would otherwise get an arbitrary accent.
+    eleven_flash_v2_5 is the multilingual flash model: one voice speaks all
+    twelve of our languages, and language_code pins the model to the one we
+    intend rather than letting it guess from the text — short replies ("Gate
+    B12.") read identically in several languages and would otherwise get an
+    arbitrary accent.
+
+    voice_settings is attached only when the traveler has actually moved a
+    slider. Omitting it leaves whatever is configured on the voice itself,
+    which is not the same as sending the API's defaults.
     """
+    extra = {}
+    if not tuning.is_default:
+        extra["voice_settings"] = VoiceSettings(
+            speed=tuning.speed,
+            stability=tuning.stability,
+            similarity_boost=0.75,
+        )
     return b"".join(
         _eleven.text_to_speech.convert(
             voice_id=voice_id,
@@ -200,6 +232,7 @@ def _elevenlabs_tts_bytes(text: str, lang: str, output_format: str, voice_id: st
             model_id="eleven_flash_v2_5",
             output_format=output_format,
             language_code=_norm_lang(lang),
+            **extra,
         )
     )
 
@@ -244,20 +277,34 @@ _CARTESIA_HEADERS = {
 }
 
 
-def _cartesia_payload(text: str, lang: str, output_format: dict, voice_id: str) -> dict:
+def _cartesia_payload(
+    text: str,
+    lang: str,
+    output_format: dict,
+    voice_id: str,
+    tuning: VoiceTuning = DEFAULT_TUNING,
+) -> dict:
     """Body for a Cartesia /tts/bytes call.
 
-    generation_config only accepts `emotion` — sending anything else (a `speed`
-    key, notably) is rejected wholesale as "invalid JSON", so keep this the one
-    place the body is built rather than hand-rolling it per call site.
+    generation_config takes `emotion` and, on Cartesia-Version 2026-03-01,
+    `speed` as a float in 0.6–1.5 (anything outside is a 400 naming the bounds,
+    and the string forms — "slow", "fast" — are rejected as invalid JSON). Our
+    slider's range sits inside that, so no extra clamping is needed here.
+
+    There is no expressiveness equivalent: `emotion` is a free string the API
+    accepts without validating, so tuning.expressiveness is deliberately
+    ignored on this path rather than mapped onto something unverifiable.
     """
+    generation_config = {"emotion": CARTESIA_EMOTION}
+    if abs(tuning.speed - VOICE_SPEED_DEFAULT) > 1e-6:
+        generation_config["speed"] = tuning.speed
     return {
         "model_id": CARTESIA_MODEL_ID,
         "transcript": text,
         "voice": {"mode": "id", "id": voice_id},
         "output_format": output_format,
         "language": _norm_lang(lang),
-        "generation_config": {"emotion": CARTESIA_EMOTION},
+        "generation_config": generation_config,
     }
 
 
@@ -957,6 +1004,9 @@ async def web_stream(ws: WebSocket):
     selected_language = "en"
     detected_language: str | None = None
     language = "en"
+    # The traveler's voice sliders. Re-sent whenever one moves, so this is the
+    # live value every synthesis after that point reads.
+    voice_tuning: VoiceTuning = DEFAULT_TUNING
     # Who we're talking to. `guest_id` is the random per-device id the browser
     # generates and is only ever an analytics/session key; `account` is set once
     # a Supabase access token has actually been verified, and is the only thing
@@ -1096,11 +1146,14 @@ async def web_stream(ws: WebSocket):
         """
         spoken = _norm_lang(lang or language)
         provider, voice_id = _voice_for(spoken)
+        # Read once per call: a slider moved mid-sentence should land on the
+        # next thing spoken, not retune this one halfway through.
+        tuning = voice_tuning
         try:
             if provider == "elevenlabs":
                 return await loop.run_in_executor(
                     _executor,
-                    lambda: _elevenlabs_tts_bytes(text, spoken, "mp3_44100_128", voice_id),
+                    lambda: _elevenlabs_tts_bytes(text, spoken, "mp3_44100_128", voice_id, tuning),
                 )
             resp = await loop.run_in_executor(
                 _executor,
@@ -1110,7 +1163,7 @@ async def web_stream(ws: WebSocket):
                     json=_cartesia_payload(
                         text, spoken,
                         {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
-                        voice_id,
+                        voice_id, tuning,
                     ),
                     timeout=15,
                 )
@@ -1255,6 +1308,10 @@ async def web_stream(ws: WebSocket):
                 detected_language = None
                 _sync_language()
                 guest_id = msg.get("userId") or guest_id
+                # Read before the greeting below is synthesized, so a returning
+                # traveler's saved sliders apply to the very first thing they
+                # hear rather than only from their second reply onward.
+                voice_tuning = VoiceTuning.from_payload(msg.get("voice"))
                 # Re-sent on every sign-in and sign-out, so an absent token has
                 # to actively drop the account rather than leaving the last one
                 # in place — otherwise signing out wouldn't take effect until
@@ -1283,6 +1340,21 @@ async def web_stream(ws: WebSocket):
                     if mp3_bytes:
                         await _send({"type": "audio", "data": base64.b64encode(mp3_bytes).decode()})
                     await _send({"type": "status", "state": "idle"})
+
+            elif msg_type == "set_voice":
+                # A slider moved. Nothing is re-spoken: retuning is not worth
+                # interrupting a sentence for, and the traveler hears the change
+                # on the next reply — which, since they are usually mid-settings
+                # sheet, is soon enough to feel connected to the drag.
+                voice_tuning = VoiceTuning.from_payload(msg.get("voice"))
+                logger.info(
+                    f"Web stream [{session_id}] voice -> speed={voice_tuning.speed} "
+                    f"expressiveness={voice_tuning.expressiveness}"
+                )
+                # Echoed back with the clamped values so a client that sent
+                # something out of range can correct its own sliders rather
+                # than showing a number the server never honoured.
+                await _send({"type": "voice", **voice_tuning.as_dict()})
 
             elif msg_type == "set_language":
                 # The user moved the language pill mid-conversation. The client

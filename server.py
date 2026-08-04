@@ -364,12 +364,15 @@ def _graph_reply(
     thread_id: str,
     user_id: str | None = None,
     user_location: dict | None = None,
+    language: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
     if user_id:
         payload["user_id"] = user_id
     if user_location:
         payload["user_location"] = user_location
+    if language:
+        payload["language"] = language
     result = graph.invoke(payload, config=_build_graph_config(thread_id))
     response_text = _extract_response_text(result)
     if not response_text:
@@ -735,6 +738,26 @@ async def twilio_stream(ws: WebSocket):
 
 # ── Web Push-to-Talk WebSocket ────────────────────────────────────────────────
 
+# The opening line is the one thing the agent says before it has seen any user
+# text, so it can't be produced by the "reply in their language" prompt rule —
+# it has to be written out per language. Re-sent whenever the language pill
+# changes, which doubles as audible confirmation that the switch took effect.
+_GREETINGS = {
+    "en": "Welcome to Oakland International Airport! I'm your AI guide. Ask me anything — gates, flights, restaurants, restrooms, or directions anywhere in the terminal.",
+    "es": "¡Bienvenido al Aeropuerto Internacional de Oakland! Soy tu guía con inteligencia artificial. Pregúntame lo que necesites: puertas, vuelos, restaurantes, baños o cómo llegar a cualquier lugar de la terminal.",
+    "zh": "欢迎来到奥克兰国际机场！我是您的人工智能向导。有任何问题都可以问我——登机口、航班、餐厅、洗手间，或者航站楼内任何地方的路线。",
+    "fr": "Bienvenue à l'aéroport international d'Oakland ! Je suis votre guide IA. Posez-moi vos questions : portes d'embarquement, vols, restaurants, toilettes ou l'itinéraire vers n'importe quel endroit du terminal.",
+    "de": "Willkommen am Oakland International Airport! Ich bin Ihr KI-Guide. Fragen Sie mich alles — Gates, Flüge, Restaurants, Toiletten oder den Weg zu jedem Ort im Terminal.",
+    "ja": "オークランド国際空港へようこそ。AIガイドです。搭乗ゲート、フライト、レストラン、お手洗い、ターミナル内のどこへの道順でも、何でもお尋ねください。",
+    "ko": "오클랜드 국제공항에 오신 것을 환영합니다! 저는 AI 가이드입니다. 탑승구, 항공편, 식당, 화장실, 터미널 내 어디로 가는 길이든 무엇이든 물어보세요.",
+    "pt": "Bem-vindo ao Aeroporto Internacional de Oakland! Sou o seu guia de inteligência artificial. Pergunte-me o que quiser: portões, voos, restaurantes, banheiros ou como chegar a qualquer lugar do terminal.",
+    "ar": "مرحبًا بك في مطار أوكلاند الدولي! أنا دليلك الذكي. اسألني عن أي شيء — البوابات أو الرحلات أو المطاعم أو دورات المياه أو الاتجاهات إلى أي مكان في المبنى.",
+    "hi": "ओकलैंड इंटरनेशनल एयरपोर्ट में आपका स्वागत है! मैं आपका AI गाइड हूँ। मुझसे कुछ भी पूछें — गेट, फ़्लाइट, रेस्तराँ, शौचालय, या टर्मिनल में कहीं भी जाने का रास्ता।",
+    "it": "Benvenuto all'aeroporto internazionale di Oakland! Sono la tua guida con intelligenza artificiale. Chiedimi qualsiasi cosa: gate, voli, ristoranti, servizi igienici o come raggiungere qualunque punto del terminal.",
+    "ru": "Добро пожаловать в международный аэропорт Окленда! Я ваш ИИ-гид. Спрашивайте о чём угодно — выходы на посадку, рейсы, рестораны, туалеты или как добраться до любого места в терминале.",
+}
+
+
 @app.websocket("/web/stream")
 async def web_stream(ws: WebSocket):
     """
@@ -915,7 +938,7 @@ async def web_stream(ws: WebSocket):
                     ctx = contextvars.copy_context()
                     reply = await loop.run_in_executor(
                         _executor,
-                        lambda t=user_text, loc=latest_location: ctx.run(_graph_reply, t, session_id, user_id, loc)
+                        lambda t=user_text, loc=latest_location, lang=language: ctx.run(_graph_reply, t, session_id, user_id, loc, lang)
                     )
             agent_text = reply["text"]
         except GraphRecursionError:
@@ -971,8 +994,9 @@ async def web_stream(ws: WebSocket):
                 user_id = msg.get("userId") or user_id
                 logger.info(f"Web stream [{session_id}] config: lang={language} user={user_id}")
 
-                # Send greeting on first config message
-                greeting = "Welcome to Oakland International Airport! I'm your AI guide. Ask me anything — gates, flights, restaurants, restrooms, or directions anywhere in the terminal."
+                # Greet in whatever language is now selected. English is the
+                # fallback for "auto" and for any code without a translation.
+                greeting = _GREETINGS.get(language, _GREETINGS["en"])
                 await _send({"type": "transcript", "role": "agent", "text": greeting})
                 await _send({"type": "status", "state": "speaking"})
                 mp3_bytes = await _tts_mp3_bytes(greeting)

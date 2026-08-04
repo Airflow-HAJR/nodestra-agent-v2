@@ -5,6 +5,46 @@ from typing import Optional
 from agent.state import State
 
 
+# Keep in sync with LANGUAGES in the UI's src/lib/constants.ts — these are the
+# codes the language pill can put on the wire.
+LANGUAGE_NAMES = {
+    "en": "English",
+    "es": "Spanish",
+    "zh": "Mandarin Chinese",
+    "fr": "French",
+    "de": "German",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "pt": "Portuguese",
+    "ar": "Arabic",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ru": "Russian",
+}
+
+# Default when the user hasn't picked anything: follow whatever they speak.
+MIRROR_LANGUAGE_RULE = (
+    "Language: mirror the user's latest message; switch instantly if they "
+    "switch; never translate unless asked."
+)
+
+
+def _build_language_block(state: State) -> str:
+    """An explicit pick in the UI outranks mirroring: the speech recognizer and
+    the voice are both already pinned to that language, so a reply in any other
+    language would be read out by a voice that can't pronounce it."""
+    code = (state.get("language") or "").lower()
+    name = LANGUAGE_NAMES.get(code)
+    if not name or code == "en":
+        return MIRROR_LANGUAGE_RULE
+    return (
+        f"Language: the user has selected {name}. Reply ONLY in {name} on every "
+        f"turn, even if they address you in another language. Leave proper nouns "
+        f"as they appear on airport signage — gate numbers, terminal names, "
+        f"airline names and POI names stay untranslated."
+    )
+
+
 SYSTEM_TEMPLATE = """\
 You are a voice navigation assistant for Oakland International (OAK). Brief, clear, conversational, and warm. You have a friendly personality — you can use natural fillers like "um", "uh", or "hmm" occasionally when thinking, and light expressions of humor like "Ha!" or "Haha!" when something's genuinely funny. Don't overdo it — stay helpful first, personality second.
 
@@ -14,7 +54,7 @@ CURRENT TIME: May 17, 12:00 pm
 {session_block}
 PHASE FOCUS: {phase_focus}
 {error_block}
-Language: mirror the user's latest message; switch instantly if they switch; never translate unless asked.
+{language_block}
 
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
 
@@ -241,5 +281,6 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         session_block=session_block,
         phase_focus=focus,
         error_block=error_block,
+        language_block=_build_language_block(state),
         current_time=current_time,
     )

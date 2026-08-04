@@ -340,9 +340,8 @@ def _resolve_trajectory_segments(raw: dict) -> list[dict]:
 
     Each resolved stop keeps its original ("index") position within the
     segment's stop list, even though stops with no GPS get filtered out —
-    that original index is what active_stop_index (and the marker's number
-    label on the map) refers to, so it must stay stable regardless of which
-    stops happen to drop out for missing GPS."""
+    that original index is what active_stop_index refers to, so it must stay
+    stable regardless of which stops happen to drop out for missing GPS."""
     out_segments: list[dict] = []
     for seg in raw.get("segments", []):
         portal = seg.get("portal_out")
@@ -418,17 +417,16 @@ def show_map_trajectory(state: Annotated[dict, InjectedState]) -> str:
     show_map_directions/show_map_route; don't call those for the same route.
 
     Unlike a flat two-point line, this shows the user's current location,
-    every named POI along the way as a numbered dot, and the final
+    every named POI along the way as a dot, and the final
     destination as a pin — so the user can see the whole path they're
     walking, not just the start and end. This call also automatically puts
     a "Made it to __ / Need help" confirmation button on the user's screen
     for the first checkpoint — you don't need a separate tool call for that.
 
-    The tool's return value tells you the next checkpoint's name and its
-    number on the map (e.g. "stop #2") — ALWAYS mention that number when you
-    tell the user where to go (e.g. "Head toward the coffee shop — that's
-    stop 2 on your map, highlighted now.") so they can match your words to
-    what's on screen.
+    The tool's return value tells you the next checkpoint's name. ALWAYS use
+    that exact name when you tell the user where to go (e.g. "Head toward the
+    coffee shop — it's highlighted on your map now.") — the highlighted dot
+    is captioned with that same name, so the words and the screen match.
 
     If the route crosses more than one level, the map shows only the
     CURRENT floor. It will NOT show later floors yet — the user hasn't
@@ -451,7 +449,7 @@ def show_map_trajectory(state: Annotated[dict, InjectedState]) -> str:
     n = len(raw["segments"])
     next_stop = _emit_checkpoint_prompt(raw, route_id, seg_idx, stop_idx)
     checkpoint_note = (
-        f" Next checkpoint: {next_stop['name']} — that's stop #{stop_idx + 1} on the map."
+        f" Next checkpoint: {next_stop['name']} — highlighted on the map, captioned with that name."
         if next_stop else ""
     )
     return f"Trajectory shown on map ({n} floor{'s' if n != 1 else ''}).{checkpoint_note}"
@@ -497,7 +495,7 @@ def request_checkpoint_confirmation(prompt_text: str, state: Annotated[dict, Inj
     stop = _emit_checkpoint_prompt(raw, route_id, seg_idx, stop_idx)
     if not stop:
         return "There's no further checkpoint on this route — the user has reached the destination."
-    return f"Checkpoint confirmation re-shown for {stop['name']} (stop #{stop_idx + 1}) — now say prompt_text to the user."
+    return f"Checkpoint confirmation re-shown for {stop['name']} — now say prompt_text to the user."
 
 
 @tool
@@ -528,7 +526,7 @@ def advance_checkpoint(
     changes floors, this also flips the map to the next floor's leg. This
     also automatically puts the confirmation button on screen for the NEW
     current checkpoint (no separate tool call needed) — the tool's return
-    value tells you its name and map number so you can mention it. It also
+    value tells you its name so you can mention it. It also
     updates the user's remembered current_location itself using the
     checkpoint's real POI id — you do NOT need to (and should not) call
     set_nav_state for this; you don't actually have that id, only the name.
@@ -557,7 +555,7 @@ def advance_checkpoint(
 
     # The checkpoint just confirmed — its real POI id becomes the new
     # current_location, set here (not by the agent, which only ever sees
-    # this stop's name/number, never its id) to avoid it having to guess.
+    # this stop's name, never its id) to avoid it having to guess.
     confirmed_stop = seg["stops"][stop_idx]
     confirmed_location_update = {"current_location": confirmed_stop["id"]}
 
@@ -577,7 +575,7 @@ def advance_checkpoint(
             "nextSegmentIndex": next_seg_idx,
         })
         next_stop = _emit_checkpoint_prompt(raw, route_id, next_seg_idx, 1)
-        note = f" Next checkpoint: {next_stop['name']} — stop #2 on the new floor's map." if next_stop else ""
+        note = f" Next checkpoint: {next_stop['name']} — highlighted on the new floor's map." if next_stop else ""
         msg = ToolMessage(
             content=f"Advanced to floor {next_seg_idx + 1} of {len(segments)}.{note}",
             tool_call_id=tool_call_id,
@@ -607,7 +605,7 @@ def advance_checkpoint(
         "nextSegmentIndex": seg_idx,
     })
     next_stop = _emit_checkpoint_prompt(raw, route_id, seg_idx, next_stop_idx)
-    note = f" Next checkpoint: {next_stop['name']} — stop #{next_stop_idx + 1} on the map." if next_stop else ""
+    note = f" Next checkpoint: {next_stop['name']} — highlighted on the map, captioned with that name." if next_stop else ""
     msg = ToolMessage(
         content=f"Advanced to checkpoint {next_stop_idx + 1} of {len(seg['stops'])} on this floor.{note}",
         tool_call_id=tool_call_id,

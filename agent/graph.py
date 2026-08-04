@@ -439,12 +439,21 @@ def _get_memory_extractor():
 def _memory_extract_node(state: State) -> dict:
     """After the agent's final answer, decide if the user's last message held a
     durable fact. If so, persist it and append it to the session cache so it's
-    recallable for the rest of this call without re-querying the DB."""
+    recallable for the rest of this call without re-querying the DB.
+
+    Guests go through exactly the same extraction — the agent should be able to
+    act on "I'm vegetarian" five minutes later whether or not anyone signed in —
+    but their facts stop at the session cache and are never written to the
+    database. That difference is the whole reason to have an account, and it
+    also means a shared airport kiosk doesn't quietly build a profile of
+    everyone who walks up to it.
+    """
     if not MEMORY_ENABLED:
         return {}
     user_id = state.get("user_id")
     if not user_id:
         return {}
+    persist = bool(state.get("persist_memory"))
 
     last_user = None
     for m in reversed(state["messages"]):
@@ -475,8 +484,14 @@ def _memory_extract_node(state: State) -> dict:
         if is_duplicate(cached, content):
             print(f"[memory: skipped duplicate — {content!r}]")
             continue
+        category = fact.category or "other"
+        if not persist:
+            cached.append({"id": None, "content": content, "category": category, "metadata": {}})
+            saved += 1
+            print(f"[memory: session-only ({category}) — {content!r}]")
+            continue
         t0 = time.time()
-        row = vm_add_memory(user_id, content, fact.category or "other")
+        row = vm_add_memory(user_id, content, category)
         add_memory(time.time() - t0)
         if row:
             cached.append(row)
@@ -698,21 +713,51 @@ def _build_subgraph():
 # ================= init (location pre-load) =================
 
 def _init_node(state: State) -> dict:
-    """At conversation start, bulk-load the user's semantic memories once."""
+    """Load the memories that belong to whoever is currently on the line.
+
+    Runs on every turn but does real work only when the identity behind the
+    conversation changes — which is once at session start for most sessions,
+    and a second time for anyone who signs in partway through.
+
+    Signing in mid-conversation is the interesting case. Guests still
+    accumulate facts (they're just never written to the database), so at the
+    moment an account appears we have two sets: what this conversation learned,
+    and what the account already knew. Both are kept — the session's facts are
+    flushed to the account, so nothing the user just said is lost by the act of
+    signing in.
+    """
     user_id = state.get("user_id")
     if not user_id or not MEMORY_ENABLED:
         return {}
 
-    # Bulk-load the user's memories once per session.
-    # Recall for the rest of the session runs against this cache — no per-turn DB hit.
-    if state.get("user_memories") is not None:
+    # Same person as last turn — the cache built below is still theirs.
+    if state.get("memories_user_id") == user_id and state.get("user_memories") is not None:
         return {}
+
+    persist = bool(state.get("persist_memory"))
+    if not persist:
+        # A guest: nothing to load, and nothing they say will outlive the
+        # conversation. Start them an empty cache so this doesn't re-run.
+        return {"user_memories": [], "memories_user_id": user_id}
 
     t0 = time.time()
     memories = fetch_all_memories(user_id)
+
+    # Carry over anything learned before the user signed in.
+    carried = [
+        m for m in (state.get("user_memories") or [])
+        if not is_duplicate(memories, m.get("content") or "")
+    ]
+    for m in carried:
+        row = vm_add_memory(user_id, m.get("content") or "", m.get("category") or "other")
+        if row:
+            memories.append(row)
+    if carried:
+        print(f"[memory: carried {len(carried)} session facts into the account]")
+
     add_memory(time.time() - t0)
     print(f"[memory: loaded {len(memories)} stored memories for session]")
-    return {"user_memories": memories}
+    return {"user_memories": memories, "memories_user_id": user_id}
 
 
 # ================= main graph =================

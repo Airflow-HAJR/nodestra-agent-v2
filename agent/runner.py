@@ -25,6 +25,9 @@ def run(user_id: str | None = None):
     initial_state: dict = {}
     if user_id:
         initial_state["user_id"] = user_id
+        # A user id given on the CLI is an explicit identity claim — treat it
+        # like a signed-in account so memories persist between runs.
+        initial_state["persist_memory"] = True
 
     timing.call_reset()
     call_started_at = time.time()

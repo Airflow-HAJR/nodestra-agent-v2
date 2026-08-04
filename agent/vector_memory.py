@@ -5,9 +5,11 @@ Memories are plain-text facts, one row per fact, keyed by the hashed user id.
 There is no embedding / vector search: the LangGraph `recall_memory` node uses
 the chat model to decide which memories are relevant, so storage stays simple.
 
-  * fetch_all_memories — load a user's memories once at session start
-  * add_memory         — persist one new fact
-  * is_duplicate       — guard against storing the same fact twice
+  * fetch_all_memories  — load a user's memories once at session start
+  * add_memory          — persist one new fact
+  * is_duplicate        — guard against storing the same fact twice
+  * delete_memory       — forget one fact (from the account sheet)
+  * delete_all_memories — forget everything about a user
 
 Degrades gracefully: if Supabase is unreachable, reads return [] and writes
 are no-ops.
@@ -79,6 +81,48 @@ def add_memory(
             mark_supabase_unreachable()
         logger.exception("add_memory failed")
         return None
+
+
+def delete_memory(user_id: str, memory_id: str) -> bool:
+    """Forget one fact. The user_id_hash is part of the WHERE clause, not just
+    the id, so a caller can only ever delete their own rows."""
+    if not supabase_ok():
+        return False
+    try:
+        result = (
+            get_supabase()
+            .table("user_memories")
+            .delete()
+            .eq("id", memory_id)
+            .eq("user_id_hash", hash_user_id(user_id))
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
+        logger.exception("delete_memory failed")
+        return False
+
+
+def delete_all_memories(user_id: str) -> int:
+    """Forget everything stored about a user. Returns how many rows went."""
+    if not supabase_ok():
+        return 0
+    try:
+        result = (
+            get_supabase()
+            .table("user_memories")
+            .delete()
+            .eq("user_id_hash", hash_user_id(user_id))
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
+        logger.exception("delete_all_memories failed")
+        return 0
 
 
 def is_duplicate(cached: list[dict] | None, content: str) -> bool:

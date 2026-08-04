@@ -64,11 +64,42 @@ ngrok http 8000
 
 4. Call or text your Twilio number.
 
+## Accounts and memory
+
+Memory is keyed by whoever the server can actually identify:
+
+| Who | Key | What survives the session |
+| --- | --- | --- |
+| Phone caller | their number (carrier-verified) | everything durable they say |
+| Signed-in web user | `sub:<supabase user id>` | everything durable they say |
+| Web guest | a random per-device id | nothing |
+
+Guests are not a degraded experience — the agent still extracts their
+preferences and acts on them for the rest of the conversation. Those facts just
+never reach the database. That's what makes signing in worth offering, and it
+means a shared kiosk doesn't quietly build a profile of everyone who walks up.
+
+The browser proves an identity by sending its Supabase access token in the
+`config` websocket message; `agent/auth.py` verifies it against Supabase's auth
+API (never by decoding the JWT locally) and the result is what sets
+`persist_memory` on the graph. An unverified token is treated as a guest. If a
+user signs in mid-conversation, the socket stays up and the graph reloads their
+memories in place — and anything learned while they were a guest is written to
+the account rather than dropped.
+
+Account-facing endpoints, all bearer-authenticated and all scoped to the
+caller's own rows:
+
+- `GET /account/me` profile + everything remembered about them
+- `DELETE /account/memories/{id}` forget one fact
+- `DELETE /account/memories` forget everything
+
 ## Endpoints
 
 - `POST /twilio/voice` incoming call webhook
 - `POST /twilio/sms` incoming SMS webhook
 - `WS /twilio/stream` Twilio media stream socket
+- `WS /web/stream` browser voice socket
 - `POST /gate-change` outbound gate-change notification
 - `GET /health` health check
 

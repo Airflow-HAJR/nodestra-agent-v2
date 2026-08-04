@@ -63,6 +63,9 @@ def chat(body: ChatIn):
     payload: dict = {"messages": [HumanMessage(content=body.message)]}
     if body.user_id:
         payload["user_id"] = body.user_id
+        # This harness exists to exercise durable memory, so a user id typed
+        # into it stands in for a signed-in account rather than a guest.
+        payload["persist_memory"] = True
 
     result = graph.invoke(payload, config)  # type: ignore
 

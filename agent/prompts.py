@@ -45,6 +45,34 @@ def _build_language_block(state: State) -> str:
     )
 
 
+def _build_account_block(state) -> str:
+    """Tell the agent whether anything it learns this conversation will outlive it.
+
+    Accounts are optional and must stay that way — a guest gets the same help,
+    just without the memory following them out the door. The agent is told the
+    difference so it can mention signing in when (and only when) the user has
+    actually said something worth keeping, rather than nagging every session.
+    """
+    if state.get("persist_memory"):
+        name = state.get("user_name")
+        who = f"They are signed in as {name}." if name else "They are signed in."
+        return (
+            f"ACCOUNT: {who} Anything durable they tell you is saved to their account "
+            f"and will be waiting for them next time — so you can say things like "
+            f"\"I'll remember that\" and mean it. "
+            + ("Using their first name occasionally is welcome; don't overuse it." if name else "")
+        )
+    return (
+        "ACCOUNT: They are using the assistant as a guest. You still remember what "
+        "they tell you for the rest of this conversation, but it is forgotten when "
+        "they leave. If — and only if — they share a lasting preference (a diet, an "
+        "accessibility need, a favorite airline) or ask you to remember something, "
+        "mention once, briefly and without pressure, that signing in with Google from "
+        "the account button at the top of the screen keeps it for next time. Never "
+        "bring it up otherwise, and never make it a condition of helping them."
+    )
+
+
 SYSTEM_TEMPLATE = """\
 You are a voice navigation assistant for Oakland International (OAK). Brief, clear, conversational, and warm. You have a friendly personality — you can use natural fillers like "um", "uh", or "hmm" occasionally when thinking, and light expressions of humor like "Ha!" or "Haha!" when something's genuinely funny. Don't overdo it — stay helpful first, personality second.
 
@@ -265,14 +293,15 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
     # The recall_memory node already picked the memories relevant to this message.
     # Surface them prominently so the agent actually uses them (no embeddings needed).
     relevant = state.get("relevant_memories") or []
+    blocks: list[str] = []
     if relevant:
         mem_lines = "\n".join(f"- {m['content']}" for m in relevant)
-        session_block = (
+        blocks.append(
             "WHAT YOU KNOW ABOUT THIS USER (relevant to what they just said — use it to "
             "personalize your help; if they ask what you remember, tell them these):\n" + mem_lines
         )
-    else:
-        session_block = ""
+    blocks.append(_build_account_block(state))
+    session_block = "\n".join(b for b in blocks if b)
 
     current_time = datetime.now().strftime("%I:%M %p")
     return SYSTEM_TEMPLATE.format(

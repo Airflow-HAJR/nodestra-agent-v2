@@ -13,8 +13,17 @@ class State(TypedDict):
     last_error: Optional[str]
     should_end: Optional[bool]
     user_id: Optional[str]
+    # True once the user has signed in: memories are written through to the
+    # database and follow them to their next visit. False for guests, whose
+    # facts live only in `user_memories` for the length of the conversation.
+    persist_memory: Optional[bool]
+    user_name: Optional[str]  # first name from the signed-in account, if any
     active_intents: Optional[List[str]]
     user_memories: Optional[List[dict]]  # ALL of this user's memories, loaded once at session start; refreshed on write
+    # Whose memories `user_memories` actually holds. Compared against user_id
+    # so signing in mid-conversation reloads the cache instead of leaving the
+    # agent looking at the guest's.
+    memories_user_id: Optional[str]
     relevant_memories: Optional[List[dict]]  # subset the recall_memory node judged relevant to the current message
     user_location: Optional[dict]  # {lat, lng, accuracy, ts} — latest GPS fix streamed from the client, if any
     language: Optional[str]  # ISO code the user picked in the UI; overrides mirroring whatever language they typed in

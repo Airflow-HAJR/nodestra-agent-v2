@@ -28,6 +28,8 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call
+from agent.auth import Account, auth_configured, bearer_token, verify_access_token
+from agent.vector_memory import delete_all_memories, delete_memory, fetch_all_memories
 from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
 from agent.config import (
     ALLOWED_ORIGINS,
@@ -426,10 +428,17 @@ def _graph_reply(
     user_id: str | None = None,
     user_location: dict | None = None,
     language: str | None = None,
+    persist_memory: bool = False,
+    user_name: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
     if user_id:
         payload["user_id"] = user_id
+        # Sent every turn, not just the first: signing in mid-conversation flips
+        # this, and the init node keys off the change to load the account's
+        # memories without restarting the session.
+        payload["persist_memory"] = persist_memory
+        payload["user_name"] = user_name
     if user_location:
         payload["user_location"] = user_location
     if language:
@@ -571,7 +580,13 @@ async def twilio_stream(ws: WebSocket):
                         ctx = contextvars.copy_context()
                         reply = await loop.run_in_executor(
                             _executor,
-                            lambda: ctx.run(_graph_reply, transcript, call_sid or "", from_number),
+                            # A phone number is an identity the carrier already
+                            # verified, so callers get durable memory the same way
+                            # a signed-in web user does.
+                            lambda: ctx.run(
+                                _graph_reply, transcript, call_sid or "", from_number,
+                                persist_memory=True,
+                            ),
                         )
             except GraphRecursionError as e:
                 log_event("graph_error", thread_id=call_sid or "", error_type="GraphRecursionError", message=str(e))
@@ -870,6 +885,33 @@ _GREETINGS = {
     "ru": "Добро пожаловать в международный аэропорт Окленда! Я ваш ИИ-гид. Спрашивайте о чём угодно — выходы на посадку, рейсы, рестораны, туалеты или как добраться до любого места в терминале.",
 }
 
+# Said instead of the full welcome when the user is signed in. They've heard the
+# tour before — what's worth saying on a return visit is that they're recognised
+# and that what they told us last time is still here. `{name}` is dropped when
+# the account has no name on it (see _greeting_for).
+_RETURNING_GREETINGS = {
+    "en": "Welcome back{name}! I've still got your preferences — where are we headed today?",
+    "es": "¡Bienvenido de nuevo{name}! Sigo teniendo tus preferencias. ¿Adónde vamos hoy?",
+    "zh": "欢迎回来{name}！您的偏好我都还记得。今天要去哪里呢？",
+    "fr": "Bon retour{name} ! J'ai toujours vos préférences. Où allons-nous aujourd'hui ?",
+    "de": "Willkommen zurück{name}! Ihre Präferenzen habe ich noch. Wohin geht es heute?",
+    "ja": "おかえりなさい{name}。前回のご希望は覚えています。今日はどちらへ向かいますか？",
+    "ko": "다시 오셨네요{name}! 이전 설정을 그대로 기억하고 있어요. 오늘은 어디로 가시나요?",
+    "pt": "Bem-vindo de volta{name}! Ainda tenho as suas preferências. Para onde vamos hoje?",
+    "ar": "أهلاً بعودتك{name}! ما زلت أحتفظ بتفضيلاتك. إلى أين نتجه اليوم؟",
+    "hi": "फिर से स्वागत है{name}! आपकी पसंद मुझे अब भी याद है। आज कहाँ जाना है?",
+    "it": "Bentornato{name}! Ho ancora le tue preferenze. Dove andiamo oggi?",
+    "ru": "С возвращением{name}! Ваши предпочтения у меня сохранились. Куда направляемся сегодня?",
+}
+
+
+def _greeting_for(lang: str, signed_in: bool, first_name: str | None) -> str:
+    """The full welcome for a guest, the short one for a signed-in returner."""
+    if not signed_in:
+        return _GREETINGS.get(lang, _GREETINGS["en"])
+    template = _RETURNING_GREETINGS.get(lang, _RETURNING_GREETINGS["en"])
+    return template.format(name=f", {first_name}" if first_name else "")
+
 
 @app.websocket("/web/stream")
 async def web_stream(ws: WebSocket):
@@ -878,7 +920,10 @@ async def web_stream(ws: WebSocket):
 
     Protocol:
       Client → Server (JSON):
-        { "type": "config",      "language": "en", "userId": "..." }
+        { "type": "config",      "language": "en", "userId": "...", "accessToken": "<supabase jwt|omitted>" }
+                                 — accessToken is optional; without one the session is a guest,
+                                   which works identically except that nothing is remembered
+                                   past the conversation. Re-sent on sign-in/sign-out.
         { "type": "audio",       "data": "<base64 webm/opus>", "language": "en", "format": "webm" }
         { "type": "audio_start", "language": "en" }               — begin a live-transcribed utterance
         { "type": "audio_chunk", "data": "<base64 webm/opus>" }   — repeated small chunks while speaking
@@ -891,6 +936,10 @@ async def web_stream(ws: WebSocket):
         { "type": "audio",              "data": "<base64 mp3>" }
         { "type": "status",             "state": "idle"|"thinking"|"speaking", "label": "..." }
         { "type": "map_action",         "action": {...} }  — show/clear a destination, route, or directions on the map
+        { "type": "account",            "signedIn": bool, "name": "...", "email": "..." }
+                                        — the server's verdict on the token just sent, so the UI
+                                          reflects what the agent actually believes, not what the
+                                          browser hoped
         { "type": "error",              "message": "..." }
     """
     if not _origin_allowed(ws.headers.get("origin")):
@@ -908,7 +957,23 @@ async def web_stream(ws: WebSocket):
     selected_language = "en"
     detected_language: str | None = None
     language = "en"
+    # Who we're talking to. `guest_id` is the random per-device id the browser
+    # generates and is only ever an analytics/session key; `account` is set once
+    # a Supabase access token has actually been verified, and is the only thing
+    # that makes memory durable. A client can claim any guest id it likes — it
+    # buys nothing — but it cannot claim an account without a valid token.
+    guest_id: str | None = None
+    account: Account | None = None
     user_id: str | None = None
+
+    def _apply_identity() -> None:
+        nonlocal user_id
+        user_id = account.user_id if account else guest_id
+
+    def _current_greeting() -> str:
+        return _greeting_for(
+            language, account is not None, account.first_name if account else None
+        )
 
     def _resolve_language() -> str:
         """Effective language: the explicit pick, or what we heard under auto."""
@@ -1096,7 +1161,10 @@ async def web_stream(ws: WebSocket):
                     ctx = contextvars.copy_context()
                     reply = await loop.run_in_executor(
                         _executor,
-                        lambda t=user_text, loc=latest_location, lang=language: ctx.run(_graph_reply, t, session_id, user_id, loc, lang)
+                        lambda t=user_text, loc=latest_location, lang=language, acct=account: ctx.run(
+                            _graph_reply, t, session_id, user_id, loc, lang,
+                            acct is not None, acct.first_name if acct else None,
+                        )
                     )
             agent_text = reply["text"]
         except GraphRecursionError:
@@ -1186,14 +1254,29 @@ async def web_stream(ws: WebSocket):
                 selected_language = msg.get("language", "en")
                 detected_language = None
                 _sync_language()
-                user_id = msg.get("userId") or user_id
-                logger.info(f"Web stream [{session_id}] config: lang={selected_language} user={user_id}")
+                guest_id = msg.get("userId") or guest_id
+                # Re-sent on every sign-in and sign-out, so an absent token has
+                # to actively drop the account rather than leaving the last one
+                # in place — otherwise signing out wouldn't take effect until
+                # the socket happened to reconnect.
+                account = await verify_access_token(msg.get("accessToken"))
+                _apply_identity()
+                await _send({
+                    "type": "account",
+                    "signedIn": account is not None,
+                    "name": account.name if account else None,
+                    "email": account.email if account else None,
+                })
+                logger.info(
+                    f"Web stream [{session_id}] config: lang={selected_language} "
+                    f"user={user_id} signed_in={account is not None}"
+                )
 
                 # Only on a genuinely fresh session. A reconnect mid-conversation
                 # sends config too, and re-greeting there would talk over
                 # whatever the user was in the middle of.
                 if msg.get("greet", True):
-                    greeting = _GREETINGS.get(language, _GREETINGS["en"])
+                    greeting = _current_greeting()
                     await _send({"type": "transcript", "role": "agent", "text": greeting})
                     await _send({"type": "status", "state": "speaking"})
                     mp3_bytes = await _tts_mp3_bytes(greeting)
@@ -1221,7 +1304,7 @@ async def web_stream(ws: WebSocket):
                     else:
                         # Nothing asked yet — the interrupted turn was the
                         # opening greeting, so just say it again.
-                        greeting = _GREETINGS.get(language, _GREETINGS["en"])
+                        greeting = _current_greeting()
                         await _send({"type": "transcript", "role": "agent", "text": greeting})
                         await _send({"type": "status", "state": "speaking"})
                         mp3_bytes = await _tts_mp3_bytes(greeting)
@@ -1474,7 +1557,8 @@ async def twilio_voice_process(request: Request):
     timing.reset()
     try:
         reply = await loop.run_in_executor(
-            _executor, _graph_reply, transcript, call_sid, from_number
+            _executor,
+            lambda: _graph_reply(transcript, call_sid, from_number, persist_memory=True),
         )
         reply_text = reply.get("text") or "I'm sorry, I had trouble with that."
     except Exception as e:
@@ -1553,7 +1637,10 @@ async def twilio_sms(request: Request):
     _sms_sessions[from_number]["turn_count"] += 1
     timing.reset()
     try:
-        reply = await loop.run_in_executor(_executor, _graph_reply, body_text, from_number, from_number)
+        reply = await loop.run_in_executor(
+            _executor,
+            lambda: _graph_reply(body_text, from_number, from_number, persist_memory=True),
+        )
     except Exception as e:
         logger.error(f"SMS graph failed [{from_number}]: {e}", exc_info=True)
         reply = {"text": "Something went wrong. Please try again."}
@@ -1697,6 +1784,63 @@ async def flight_change_call(body: FlightChangeCallRequest):
     except Exception as e:
         logger.error(f"Outbound agent call failed for {body.phone}: {e}")
         return {"status": "error", "error": str(e)}
+
+
+# ── Account ───────────────────────────────────────────────────────────────────
+#
+# Everything here is optional. The agent works fine for someone who never signs
+# in; an account exists purely so the preferences it picks up survive the walk
+# out of the terminal. These endpoints are what the account sheet in the web UI
+# reads and writes, and every one of them resolves the caller from their bearer
+# token rather than trusting any id in the request.
+
+
+async def _require_account(request: Request) -> Account:
+    if not auth_configured():
+        raise HTTPException(status_code=503, detail="accounts are not configured on this server")
+    account = await verify_access_token(bearer_token(request.headers.get("authorization")))
+    if account is None:
+        raise HTTPException(status_code=401, detail="not signed in")
+    return account
+
+
+@app.get("/account/me")
+async def account_me(request: Request):
+    """The signed-in user's profile plus everything the agent remembers about
+    them — the account sheet shows the list so the memory is never a black box."""
+    account = await _require_account(request)
+    loop = asyncio.get_running_loop()
+    memories = await loop.run_in_executor(_executor, fetch_all_memories, account.user_id)
+    return {
+        "id": account.id,
+        "email": account.email,
+        "name": account.name,
+        "avatarUrl": account.avatar_url,
+        "memories": [
+            {"id": m.get("id"), "content": m.get("content"), "category": m.get("category")}
+            for m in memories
+        ],
+    }
+
+
+@app.delete("/account/memories/{memory_id}")
+async def account_delete_memory(memory_id: str, request: Request):
+    """Forget one thing. Scoped to the caller's own rows inside delete_memory."""
+    account = await _require_account(request)
+    loop = asyncio.get_running_loop()
+    deleted = await loop.run_in_executor(_executor, delete_memory, account.user_id, memory_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="no such memory")
+    return {"status": "deleted", "id": memory_id}
+
+
+@app.delete("/account/memories")
+async def account_clear_memories(request: Request):
+    """Forget everything. The 'start fresh' button in the account sheet."""
+    account = await _require_account(request)
+    loop = asyncio.get_running_loop()
+    count = await loop.run_in_executor(_executor, delete_all_memories, account.user_id)
+    return {"status": "cleared", "count": count}
 
 
 # ── Map cache ─────────────────────────────────────────────────────────────────

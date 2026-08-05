@@ -31,7 +31,7 @@ from twilio.twiml.voice_response import Connect, Gather, Stream, VoiceResponse
 from agent.analytics import finish_call, hash_user_id, insert_call, insert_turn, start_call
 from agent.auth import Account, auth_configured, bearer_token, verify_access_token
 from agent.vector_memory import delete_all_memories, delete_memory, fetch_all_memories
-from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used
+from agent.graph import bind_map_callback, bind_sentence_callback, bind_speak_early_callback, bind_tool_status_callback, get_turn_tools_used, save_memory_in_background
 from agent.config import (
     ALLOWED_ORIGINS,
     CARTESIA_API_KEY,
@@ -490,7 +490,10 @@ def _graph_reply(
         payload["user_location"] = user_location
     if language:
         payload["language"] = language
-    result = graph.invoke(payload, config=_build_graph_config(thread_id))
+    config = _build_graph_config(thread_id)
+    result = graph.invoke(payload, config=config)
+    # Memory extraction runs in the background — never blocks the reply.
+    save_memory_in_background(config, result)
     response_text = _extract_response_text(result)
     if not response_text:
         return {"text": "I'm having trouble with that. Please try again.", "hangup": False}

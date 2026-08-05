@@ -79,11 +79,38 @@ def fmt_poi(p: dict) -> dict:
     return {"id": p["id"], "name": p["name"], "type": p.get("type", ""), "level": p["_level_name"]}
 
 
+# Common words travelers use that don't literally appear as a POI type. Maps a
+# user word to the canonical type(s) it should resolve to. Edit-distance alone
+# can't bridge these ("coffee" → "cafe" is 4 edits), so they're spelled out.
+_TYPE_SYNONYMS: dict[str, set[str]] = {
+    "coffee": {"cafe"},
+    "cafe": {"cafe"},
+    "espresso": {"cafe"},
+    "food": {"restaurant", "cafe"},
+    "eat": {"restaurant", "cafe"},
+    "restaurant": {"restaurant"},
+    "dining": {"restaurant"},
+    "drink": {"restaurant", "cafe", "bar"},
+    "bar": {"bar", "restaurant"},
+    "bathroom": {"restroom"},
+    "toilet": {"restroom"},
+    "washroom": {"restroom"},
+    "water": {"water-fountain"},
+    "book": {"bookstore"},
+    "books": {"bookstore"},
+    "shopping": {"shop", "duty-free", "bookstore"},
+    "store": {"shop", "duty-free"},
+    "nursing": {"nursing-room"},
+    "baby": {"nursing-room", "baby-changing-station"},
+    "lounge": {"lounge"},
+}
+
+
 def matching_poi_types(query: str, levels: list[dict]) -> set[str]:
     """
     Resolve a user-provided type string to actual types in the map.
-    Substring match first, falls back to Levenshtein for synonyms/typos
-    (e.g. 'bathroom' → 'restroom').
+    Synonym table first (coffee→cafe, bathroom→restroom), then substring match,
+    then Levenshtein for the remaining typos.
     """
     types = {
         (p.get("type") or "").lower().strip()
@@ -93,6 +120,13 @@ def matching_poi_types(query: str, levels: list[dict]) -> set[str]:
     q = query.lower().strip()
     if not q or not types:
         return set()
+
+    # Synonyms take priority — but only keep the ones that actually exist in this map.
+    synonyms = _TYPE_SYNONYMS.get(q)
+    if synonyms:
+        present = synonyms & types
+        if present:
+            return present
 
     substring = {t for t in types if q in t or t in q}
     if substring:

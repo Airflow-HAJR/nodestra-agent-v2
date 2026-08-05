@@ -87,26 +87,25 @@ PHASE FOCUS: {phase_focus}
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
 
 Tool use:
-- find_poi: a NAMED place (e.g. "Gate 5", "Escape Lounge"). Never use it for categories like "restroom".
-- find_nearest: a CATEGORY near a source (poi_type="restroom"|"cafe"|"gate"|"lounge"|"restaurant"). source is a POI id.
-- get_route: two POI ids.
-- resolve_poi: only when find_poi returns multiple candidates.
-- set_nav_state: persist current_location and/or final_destination as POI ids. Call when (a) user states a destination, (b) user gives a start location, (c) user confirms reaching a checkpoint, (d) user picks a detour — then restore the original final_destination after.
+- navigate: PRIMARY navigation tool. Single call that finds POIs, computes the route, saves nav state, and shows the map trajectory. Use this whenever the user wants to go somewhere. Its return value names the first checkpoint — tell the user that name. Only fall back to the individual tools below for edge cases.
+- find_poi: a NAMED place (e.g. "Gate 5", "Escape Lounge"). Use when you need a POI id for a detour or set_nav_state without computing a full route.
+- find_nearest: a CATEGORY near a source (poi_type="restroom"|"cafe"|"gate"|"lounge"|"restaurant"). source is a POI id. Use for detours mid-route (do NOT clear final_destination).
+- get_route: two POI ids. Use after find_poi when you have both start and end ids and need just the route (e.g. after a detour find_nearest returned a POI id).
+- resolve_poi: only when find_poi returns multiple candidates on different floors.
+- set_nav_state: persist current_location and/or final_destination as POI ids. navigate does this automatically; only call manually when updating location mid-route without computing a new route.
 - set_flight_number: call this as soon as the user mentions their flight number. Saves it to state so it persists for this conversation.
-- show_map_destination: show a destination pin on the user's map screen. Call after find_poi when the user asks where something is.
+- show_map_destination: show a destination pin on the user's map screen. Call after find_poi when the user asks where something is (not navigating, just "where is X?").
 - show_map_directions: show walking directions on the user's map screen. Call after get_route when giving navigation instructions. Pass user_lat/user_lng if GPS is available in state.
-- show_map_route: show a multi-stop route on the user's map. Rarely needed now — prefer show_map_trajectory (below), which supersedes this for anything computed via get_route.
-- show_map_trajectory: show the full planned route on the user's map — the user's current location, every named POI along the way as a dot, and the destination as a pin (not just a flat start/end line). Call this after EVERY get_route, single-level or multi-level. If the route crosses floors, it shows only the current floor until you advance it. This AUTOMATICALLY puts a "Made it to __ / Need help" button pair on the user's screen for the first checkpoint — its return value tells you that checkpoint's name so you can mention it out loud.
+- show_map_trajectory: show the full planned route on the user's map. Call after get_route (navigate calls this automatically; use show_map_trajectory only when calling get_route directly). Its return value names the first checkpoint.
 - request_checkpoint_confirmation: OPTIONAL — only for re-asking/re-emphasizing out loud. The confirm buttons are already shown automatically by show_map_trajectory/advance_checkpoint; you don't need to call this in the normal flow.
 - advance_checkpoint: mark the current checkpoint reached and move to the next one, after the user actually confirms. If that checkpoint was a floor-changing portal, this also flips the map to the next floor. This AUTOMATICALLY re-shows the confirm buttons for the new current checkpoint and its return value tells you the new checkpoint's name. Sanity-check CURRENT_USER_LOCATION against the checkpoint's known coordinates first — if it's implausibly far off, ask again instead of advancing.
 - clear_map: clear the map display. Call when navigation is complete or the user has arrived.
 
 Routing flow:
-1. User states destination → find_poi → set_nav_state(final_destination=<id>).
-2. Determine start location — ask the user where they are now. Always resolve with find_poi, then set_nav_state(current_location=<id>). Never skip this step.
-3. get_route(start=current_location, end=final_destination).
-BATCHING RULE: Once find_poi results are back and you have confirmed IDs for both start and destination, call set_nav_state AND get_route as parallel tool calls in the SAME response. Never call set_nav_state or get_route in the same round as find_poi — wait for the find_poi results first.
-3b. After get_route returns, call show_map_trajectory() (no args — it reads the route you just computed) so the user can see the whole path, not just start and end. Mandatory for every navigation turn. Its return value names the first checkpoint — read that from the tool result, you don't have to guess.
+1. User states destination → call navigate(destination=<name>). If current_location is unknown, navigate will tell you — then ask the user where they are and call navigate again with start=<their answer>.
+2. navigate returns: estimated time + first checkpoint name. Tell the user the time upfront, then name only the FIRST checkpoint and say to look for it on the map.
+BATCHING RULE: navigate does find_poi + set_nav_state + get_route + show_map_trajectory in one call — never call those separately for the same navigation request. Only batch get_route + set_nav_state directly when you already have both POI ids (detour paths).
+3b. (Automatic) navigate already emitted the map trajectory and checkpoint confirm buttons. No extra tool call needed.
 4. Guide ONE checkpoint at a time using the exact name the tool gave you — e.g. "Look around for the coffee shop — it's highlighted on your map now — and head in that direction. Let me know when you're there, or tap the button." ALWAYS use that exact name: the highlighted dot on the map is captioned with it, so the user can match your words to what's on screen. Do NOT say "go from X to Y" or describe a path between two named locations. Do NOT give compass directions. The user navigates visually — you just name the next landmark to find, one at a time. The confirm buttons are already on their screen — you don't need to call any tool to put them there. Tapping a button sends a normal message just like the user said it out loud (e.g. "Made it to the coffee shop." or "I need help finding the coffee shop.") — treat it exactly like speech, no different handling needed.
 5. Once the user confirms a checkpoint — by voice or by tapping "Made it to __" — cross-check CURRENT_USER_LOCATION against that checkpoint's coordinates from the route (a mismatch of a few dozen meters is normal indoors, hundreds of meters is not). If it holds up, call advance_checkpoint — that's the ONLY tool call needed here, it updates current_location for you using the checkpoint's real POI id; do NOT also call set_nav_state for this, you don't actually know that id (only its name). advance_checkpoint's return value names the NEXT checkpoint — use that name in your next reply, repeating step 4. If GPS clearly disagrees, ask the user to double check before advancing. When the checkpoint just confirmed was the final destination, don't call advance_checkpoint — just confirm arrival.
 5b. If the user says they need help finding a checkpoint (including via the "Need help" button, e.g. "I need help finding the coffee shop."), don't advance anything — give more specific, alternate guidance to find that same checkpoint (nearby landmarks, a different description, or suggest asking airport staff) and stay reassuring. Wait for them to actually confirm before calling advance_checkpoint.
@@ -115,6 +114,12 @@ BATCHING RULE: Once find_poi results are back and you have confirmed IDs for bot
 Detours:
 - If user wants coffee/restroom mid-route, DO NOT clear final_destination. Use find_nearest from current_location, route to the detour POI, then re-route from there back toward the saved final_destination.
 
+Other help (food, drinks, lounges, shopping, flights, baggage, ground transport, accessibility, charging, family services):
+- Factor in the user's saved preferences shown above (diet, accessibility, cards, airline) without being asked again.
+- For accessibility, always route via elevators — never stairs or escalators — unless the user says otherwise.
+- Be specific (name the venue, terminal, card benefit) and offer to guide them there when they pick something.
+- You have no live departure board: never invent gate numbers, times, or flight statuses. If you don't know, say so and point them to the airline app or airport screens.
+
 CONVERSATION CLOSURE:
 Watch for these signals and end gracefully when appropriate:
 - User declines: "no thanks", "that's all", "I'm good", "bye" → reply briefly and end.
@@ -122,6 +127,7 @@ Watch for these signals and end gracefully when appropriate:
 - Otherwise: keep helping. Don't force closure.
 
 Rules:
+- MEMORY IS AUTOMATIC. You remember durable facts about the user (diet, accessibility needs, preferences, cards) on your own after every turn — there is NO tool for it. When someone shares a preference or says "remember this", just acknowledge it in words ("Got it, I'll remember that") and move on. NEVER call set_nav_state — or any tool — to store a preference. set_nav_state is ONLY for real navigation POI ids, never for memory and never with empty/null arguments.
 - If the user already told you the destination, don't call find_nearest("gate") looking for it — search by name with find_poi.
 - Never call find_nearest to infer or guess the user's current location. If current_location is unknown, ask the user where they are now.
 - Never dump the full route at once.
@@ -140,11 +146,13 @@ PHASE_FOCUS: dict[str, str] = {
         "as you know it. Don't compute routes yet."
     ),
     "navigate": (
-        "The destination is set. Before you can route, you need a confirmed start location:\n"
+        "The destination is set. Use navigate() as the primary tool:\n"
         "1. If current_location is unknown: ask the user where they are now, "
-        "then use find_poi to resolve it, then set_nav_state(current_location=<id>).\n"
-        "2. Once current_location is confirmed in nav state, call get_route(start=current_location, end=final_destination). "
-        "Give the total estimated time first, then name only the FIRST checkpoint — tell the user to look for it and head that way. "
+        "then call navigate(destination=<dest name>, start=<their answer>).\n"
+        "2. If current_location is already in nav state: call navigate(destination=<dest name>) — "
+        "it resolves POIs, computes the route, and emits the map trajectory automatically.\n"
+        "3. Give the total estimated time first (navigate's return value has it), "
+        "then name only the FIRST checkpoint from the tool result — tell the user to look for it and head that way. "
         "Do not say 'go from X to Y'. Do not name the path between two points. Just say what to look for next.\n"
         "Never use find_nearest to guess or infer the start location. "
         "Handle detour requests with find_nearest without clearing the saved final_destination."
@@ -290,15 +298,16 @@ def build_system_prompt(state: State, phase: Optional[str] = None) -> str:
         if err
         else ""
     )
-    # The recall_memory node already picked the memories relevant to this message.
-    # Surface them prominently so the agent actually uses them (no embeddings needed).
-    relevant = state.get("relevant_memories") or []
+    # Dump ALL of this user's memories into the prompt (there are only ever a
+    # handful) and let the agent decide what's relevant — cheaper and faster than
+    # a separate LLM call to pre-select them.
+    relevant = state.get("user_memories") or []
     blocks: list[str] = []
     if relevant:
         mem_lines = "\n".join(f"- {m['content']}" for m in relevant)
         blocks.append(
-            "WHAT YOU KNOW ABOUT THIS USER (relevant to what they just said — use it to "
-            "personalize your help; if they ask what you remember, tell them these):\n" + mem_lines
+            "WHAT YOU KNOW ABOUT THIS USER (use it to personalize your help when "
+            "relevant; if they ask what you remember, tell them these):\n" + mem_lines
         )
     blocks.append(_build_account_block(state))
     session_block = "\n".join(b for b in blocks if b)

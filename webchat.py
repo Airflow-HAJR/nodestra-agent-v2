@@ -11,6 +11,7 @@ memories load at the start of the session.
 """
 from __future__ import annotations
 
+import time
 import uuid
 
 from fastapi import FastAPI
@@ -18,8 +19,10 @@ from fastapi.responses import HTMLResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
-from agent.graph import ITERATION_CAP, graph
+from agent.config import FAST_LLM_LABEL, OPENAI_MODEL_MAIN
+from agent.graph import ITERATION_CAP, get_turn_tools_used, graph, save_memory_in_background
 from agent.vector_memory import fetch_all_memories
+from agent import timing
 
 app = FastAPI(title="Agent Memory Test UI")
 
@@ -67,7 +70,13 @@ def chat(body: ChatIn):
         # into it stands in for a signed-in account rather than a guest.
         payload["persist_memory"] = True
 
+    timing.reset()
+    t0 = time.time()
     result = graph.invoke(payload, config)  # type: ignore
+    turn_secs = time.time() - t0
+    snap = timing.turn_snapshot(turn_secs)
+    # Memory extraction runs in the background — never blocks the reply.
+    save_memory_in_background(config, result)
 
     reply = ""
     for m in reversed(result.get("messages", [])):
@@ -79,7 +88,23 @@ def chat(body: ChatIn):
     cached = result.get("user_memories") or []
     memories = [{"content": r.get("content"), "category": r.get("category")} for r in cached]
 
-    return {"reply": reply, "memories": memories}
+    latency = {
+        "total_ms": round(snap["total_ms"]),
+        "main_llm_ms": round(snap["main_llm_ms"]),
+        "main_llm_calls": snap["main_llm_calls"],
+        "main_llm_model": OPENAI_MODEL_MAIN,
+        "fast_llm_ms": round(snap["fast_llm_ms"]),
+        "fast_llm_calls": snap["fast_llm_calls"],
+        "fast_llm_model": FAST_LLM_LABEL,
+        "tool_ms": round(snap["tool_ms"]),
+        "tool_calls": snap["tool_calls"],
+        "tools_used": get_turn_tools_used(),
+        "memory_ms": round(snap["memory_ms"]),
+        "other_ms": round(snap["other_ms"]),
+    }
+    timing.reset()
+
+    return {"reply": reply, "memories": memories, "latency": latency}
 
 
 @app.get("/api/memories")
@@ -139,6 +164,14 @@ _HTML = """
          animation:blink 1.2s infinite; margin:0 1px; }
   .dot:nth-child(2){animation-delay:.2s} .dot:nth-child(3){animation-delay:.4s}
   @keyframes blink{0%,60%,100%{opacity:.3}30%{opacity:1}}
+  .latency { font-size:11px; color:var(--muted); margin-top:6px; }
+  .latency summary { cursor:pointer; list-style:none; }
+  .latency summary::-webkit-details-marker { display:none; }
+  .latency summary::before { content:"⏱ "; }
+  .latency .rows { margin-top:4px; display:flex; flex-direction:column; gap:2px; padding-left:4px; }
+  .latency .row { display:flex; justify-content:space-between; gap:12px; }
+  .latency .label { color:var(--muted); }
+  .latency .val { color:var(--text); font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -167,11 +200,41 @@ const sessionId = crypto.randomUUID();
 const $ = s => document.querySelector(s);
 const transcript = $("#transcript");
 
-function addMsg(role, text){
+function addMsg(role, text, latency){
+  const wrap = document.createElement("div");
+  wrap.style.cssText = "display:flex;flex-direction:column;" + (role==="user" ? "align-items:flex-end" : "align-items:flex-start");
   const el = document.createElement("div");
   el.className = "msg " + role;
   el.textContent = text;
-  transcript.appendChild(el);
+  wrap.appendChild(el);
+  if(latency && role === "bot"){
+    const tools = latency.tools_used && latency.tools_used.length
+      ? latency.tools_used.join(", ")
+      : "—";
+    const rows = [
+      ["Main LLM", `${latency.main_llm_model}: ${latency.main_llm_ms}ms`],
+      ["Fast LLM", `${latency.fast_llm_model}: ${latency.fast_llm_ms}ms ×${latency.fast_llm_calls}`],
+      ["Tools", `${tools}: ${latency.tool_ms}ms`],
+      ["Memory DB", `${latency.memory_ms}ms`],
+      ["Network/other", `${latency.other_ms}ms`],
+    ];
+    const det = document.createElement("details");
+    det.className = "latency";
+    const sum = document.createElement("summary");
+    sum.textContent = `${latency.total_ms}ms`;
+    det.appendChild(sum);
+    const rowsEl = document.createElement("div");
+    rowsEl.className = "rows";
+    for(const [label, val] of rows){
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<span class="label">${label}</span><span class="val">${val}</span>`;
+      rowsEl.appendChild(row);
+    }
+    det.appendChild(rowsEl);
+    wrap.appendChild(det);
+  }
+  transcript.appendChild(wrap);
   transcript.scrollTop = transcript.scrollHeight;
   return el;
 }
@@ -204,14 +267,53 @@ async function send(){
   addMsg("user", text);
   const typing = addMsg("bot", "");
   typing.innerHTML = '<span class="dot"></span><span class="dot"></span><span class="dot"></span>';
+  // Wrap the bot bubble in a column container so latency can be appended below it.
+  if(typing.parentElement.style.cssText === ""){
+    typing.parentElement.style.cssText = "display:flex;flex-direction:column;align-items:flex-start";
+  }
   try{
     const r = await fetch("/api/chat", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ user_id: $("#userId").value.trim(), session_id: sessionId, message: text })
     });
     const d = await r.json();
+    // Replace the typing indicator's parent wrapper with the real reply+latency
+    const wrap = typing.parentElement;
     typing.textContent = d.reply || "(no reply)";
+    if(d.latency && wrap){
+      const tools = d.latency.tools_used && d.latency.tools_used.length
+        ? d.latency.tools_used.join(", ")
+        : "—";
+      const rows = [
+        ["Main LLM", `${d.latency.main_llm_model}: ${d.latency.main_llm_ms}ms`],
+        ["Fast LLM", `${d.latency.fast_llm_model}: ${d.latency.fast_llm_ms}ms ×${d.latency.fast_llm_calls}`],
+        ["Tools", `${tools}: ${d.latency.tool_ms}ms`],
+        ["Memory DB", `${d.latency.memory_ms}ms`],
+        ["Network/other", `${d.latency.other_ms}ms`],
+      ];
+      const det = document.createElement("details");
+      det.className = "latency";
+      const sum = document.createElement("summary");
+      sum.textContent = `${d.latency.total_ms}ms`;
+      det.appendChild(sum);
+      const rowsEl = document.createElement("div");
+      rowsEl.className = "rows";
+      for(const [label, val] of rows){
+        const row = document.createElement("div");
+        row.className = "row";
+        row.innerHTML = `<span class="label">${label}</span><span class="val">${val}</span>`;
+        rowsEl.appendChild(row);
+      }
+      det.appendChild(rowsEl);
+      wrap.appendChild(det);
+    }
     renderMemories(d.memories);
+    // Memory extraction runs in the background AFTER the reply, so a fact the
+    // user just mentioned isn't saved yet when this response returns. Re-poll
+    // the panel a few times so it appears once the background save lands.
+    setTimeout(loadMemories, 1500);
+    setTimeout(loadMemories, 3500);
+    setTimeout(loadMemories, 6000);
   }catch(e){
     typing.className = "msg sys";
     typing.textContent = "Error: " + e;

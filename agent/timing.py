@@ -3,7 +3,8 @@ Call-level accumulator persists across turns; reset with call_reset()."""
 
 # Per-turn stats (reset each turn)
 _stats: dict = {
-    "llm_ms": 0.0, "llm_calls": 0,
+    "main_llm_ms": 0.0, "main_llm_calls": 0,
+    "fast_llm_ms": 0.0, "fast_llm_calls": 0,
     "tool_ms": 0.0, "tool_calls": 0,
     "memory_ms": 0.0, "memory_calls": 0,
     "moss_ms": 0.0, "moss_calls": 0,
@@ -21,15 +22,17 @@ _call: dict = {
 
 def reset():
     """Flush per-turn stats into call-level accumulator, then reset turn stats."""
-    _call["total_llm_ms"] += _stats["llm_ms"]
-    _call["llm_calls"] += _stats["llm_calls"]
+    total_llm = _stats["main_llm_ms"] + _stats["fast_llm_ms"]
+    _call["total_llm_ms"] += total_llm
+    _call["llm_calls"] += _stats["main_llm_calls"] + _stats["fast_llm_calls"]
     _call["total_tool_ms"] += _stats["tool_ms"]
     _call["tool_calls"] += _stats["tool_calls"]
     _call["total_tts_ms"] += _stats["tts_ms"]
     _call["turn_count"] += 1
 
     _stats.update({
-        "llm_ms": 0.0, "llm_calls": 0,
+        "main_llm_ms": 0.0, "main_llm_calls": 0,
+        "fast_llm_ms": 0.0, "fast_llm_calls": 0,
         "tool_ms": 0.0, "tool_calls": 0,
         "memory_ms": 0.0, "memory_calls": 0,
         "moss_ms": 0.0, "moss_calls": 0,
@@ -52,22 +55,37 @@ def call_reset():
 def turn_snapshot(total_seconds: float) -> dict:
     """Return current turn's stats (call after invoke, before next reset)."""
     total_ms = total_seconds * 1000
+    main_ms = _stats["main_llm_ms"]
+    fast_ms = _stats["fast_llm_ms"]
+    llm_ms = main_ms + fast_ms
+    tool_ms = _stats["tool_ms"]
+    tts_ms = _stats["tts_ms"]
+    mem_ms = _stats["memory_ms"]
     return {
-        "llm_ms": _stats["llm_ms"],
-        "llm_calls": _stats["llm_calls"],
-        "tool_ms": _stats["tool_ms"],
+        # Combined (backward compat with analytics insert_turn)
+        "llm_ms": llm_ms,
+        "llm_calls": _stats["main_llm_calls"] + _stats["fast_llm_calls"],
+        # Split buckets (new)
+        "main_llm_ms": main_ms,
+        "main_llm_calls": _stats["main_llm_calls"],
+        "fast_llm_ms": fast_ms,
+        "fast_llm_calls": _stats["fast_llm_calls"],
+        # Rest
+        "tool_ms": tool_ms,
         "tool_calls": _stats["tool_calls"],
-        "tts_ms": _stats["tts_ms"],
+        "memory_ms": mem_ms,
+        "tts_ms": tts_ms,
         "total_ms": total_ms,
-        "other_ms": max(0.0, total_ms - _stats["llm_ms"] - _stats["tool_ms"] - _stats["tts_ms"]),
+        "other_ms": max(0.0, total_ms - llm_ms - tool_ms - tts_ms - mem_ms),
     }
 
 
 def call_snapshot() -> dict:
     """Return call-level stats accumulated so far (includes current in-flight turn)."""
+    llm_ms = _stats["main_llm_ms"] + _stats["fast_llm_ms"]
     return {
-        "total_llm_ms": _call["total_llm_ms"] + _stats["llm_ms"],
-        "llm_calls": _call["llm_calls"] + _stats["llm_calls"],
+        "total_llm_ms": _call["total_llm_ms"] + llm_ms,
+        "llm_calls": _call["llm_calls"] + _stats["main_llm_calls"] + _stats["fast_llm_calls"],
         "total_tool_ms": _call["total_tool_ms"] + _stats["tool_ms"],
         "tool_calls": _call["tool_calls"] + _stats["tool_calls"],
         "total_tts_ms": _call["total_tts_ms"] + _stats["tts_ms"],
@@ -75,9 +93,19 @@ def call_snapshot() -> dict:
     }
 
 
+def add_main_llm(seconds: float):
+    _stats["main_llm_ms"] += seconds * 1000
+    _stats["main_llm_calls"] += 1
+
+
+# Alias — kept so existing callers of add_llm() in the main agent node don't break.
 def add_llm(seconds: float):
-    _stats["llm_ms"] += seconds * 1000
-    _stats["llm_calls"] += 1
+    add_main_llm(seconds)
+
+
+def add_fast_llm(seconds: float):
+    _stats["fast_llm_ms"] += seconds * 1000
+    _stats["fast_llm_calls"] += 1
 
 
 def add_tool(seconds: float, count: int = 1):
@@ -106,15 +134,17 @@ def _fmt(ms: float, calls: int) -> str:
 
 def summary(total_seconds: float) -> str:
     total_ms = total_seconds * 1000
-    llm_ms   = _stats["llm_ms"]
+    main_ms  = _stats["main_llm_ms"]
+    fast_ms  = _stats["fast_llm_ms"]
     tool_ms  = _stats["tool_ms"]
     mem_ms   = _stats["memory_ms"]
     moss_ms  = _stats["moss_ms"]
     tts_ms   = _stats["tts_ms"]
-    other_ms = total_ms - llm_ms - tool_ms - mem_ms - moss_ms - tts_ms
+    other_ms = total_ms - main_ms - fast_ms - tool_ms - mem_ms - moss_ms - tts_ms
     return (
         f"LATENCY  total={total_ms:.0f}ms"
-        f"  llm={_fmt(llm_ms, _stats['llm_calls'])}"
+        f"  main_llm={_fmt(main_ms, _stats['main_llm_calls'])}"
+        f"  fast_llm={_fmt(fast_ms, _stats['fast_llm_calls'])}"
         f"  tools={_fmt(tool_ms, _stats['tool_calls'])}"
         f"  memory={_fmt(mem_ms, _stats['memory_calls'])}"
         f"  moss={_fmt(moss_ms, _stats['moss_calls'])}"

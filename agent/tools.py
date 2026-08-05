@@ -18,7 +18,7 @@ from agent.map_engine import (
     matching_poi_types,
     search_pois,
 )
-from agent.map_tools import MAP_TOOLS
+from agent.map_tools import MAP_TOOLS, _emit_checkpoint_prompt, _emit_trajectory
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +268,13 @@ def set_nav_state(
     Pass POI ids (e.g. 'gate-J292'), not raw names. Pass only the field(s) that changed.
     """
     print("[thinking]")
+    # Nothing to set — bail before loading the map. Guards against the agent
+    # calling this as a no-op (e.g. reaching for a "save" tool it doesn't need);
+    # the map load and state churn for an all-null call are pure waste.
+    if final_destination is None and current_location is None:
+        return Command(update={
+            "messages": [ToolMessage(content="No navigation change to apply.", tool_call_id=tool_call_id)],
+        })
     levels = load_map_levels(DEFAULT_AIRPORT)
     poi_by_id = {p["id"]: p for lvl in levels for p in lvl["pois"]}
     valid_ids = set(poi_by_id)
@@ -430,7 +437,208 @@ def track_flight_changes(
     )
 
 
+# ---------------------------------------------------------------------------
+# Composite navigation tool — replaces the find_poi → set_nav_state →
+# get_route → show_map_trajectory chain with a single LLM call.
+# ---------------------------------------------------------------------------
+
+def _display_name(stop: dict) -> str:
+    """Human-friendly name for a stop. Gate POIs carry a bare number as their
+    name ("10", "8A"), which reads badly spoken aloud — turn those into
+    "Gate 10". Everything else already has a descriptive name."""
+    name = (stop.get("name") or "").strip()
+    typ = (stop.get("type") or "").lower().strip()
+    if typ == "gate" and name and not name.lower().startswith("gate"):
+        return f"Gate {name}"
+    return name
+
+
+def _generate_checkpoint_scripts(raw: dict, dest_name: str) -> list[str]:
+    """Pre-write the "head toward next stop" reply for every checkpoint in the route.
+
+    Scripts are consumed in order — scripts[0] is the reply after the user confirms
+    the first checkpoint, scripts[1] after the second, etc. The router in graph.py
+    uses these to skip the second main-LLM call on each checkpoint confirmation turn.
+    """
+    scripts: list[str] = []
+    segments = raw.get("segments", [])
+    n_segs = len(segments)
+
+    for seg_i, seg in enumerate(segments):
+        stops = seg.get("stops", [])
+        n_stops = len(stops)
+        is_last_seg = seg_i == n_segs - 1
+
+        for stop_i in range(1, n_stops):  # skip index 0 (origin / portal-in)
+            is_last_stop = stop_i == n_stops - 1
+            is_final = is_last_stop and is_last_seg
+            is_portal = is_last_stop and not is_last_seg
+
+            if is_final:
+                scripts.append(
+                    f"You've made it to {dest_name}! Great work. "
+                    "Is there anything else I can help you with?"
+                )
+            elif is_portal:
+                next_seg = segments[seg_i + 1]
+                next_stops = next_seg.get("stops", [])
+                next_cp = next_stops[1] if len(next_stops) > 1 else None
+                if next_cp:
+                    scripts.append(
+                        f"You're through! We're now on {next_seg['level_name']}. "
+                        f"Look for {_display_name(next_cp)} — it's highlighted on your map. "
+                        "Tap the button when you get there."
+                    )
+                else:
+                    scripts.append(
+                        f"You're on the next level — keep heading toward {dest_name}."
+                    )
+            else:
+                next_stop = stops[stop_i + 1]
+                scripts.append(
+                    f"Keep going — now look for {_display_name(next_stop)}, highlighted on your map. "
+                    "Tap the button when you get there."
+                )
+
+    return scripts
+
+
+class NavigateInput(BaseModel):
+    destination: str = Field(
+        description="Destination name or description (e.g. 'Gate 5', 'Escape Lounge', 'Security')"
+    )
+    start: Optional[str] = Field(
+        default=None,
+        description="Start location name — omit if the user's current_location is already set in state",
+    )
+    airport_id: str = Field(default=DEFAULT_AIRPORT)
+
+
+@tool(args_schema=NavigateInput)
+def navigate(
+    destination: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[dict, InjectedState],
+    start: Optional[str] = None,
+    airport_id: str = DEFAULT_AIRPORT,
+) -> Command:
+    """All-in-one navigation: find POIs, compute route, save nav state, and show map trajectory.
+
+    Use this as the PRIMARY tool whenever the user wants directions or to go somewhere.
+    Returns estimated walking time and first checkpoint name so you can brief the user.
+    Fall back to the individual tools (find_poi, get_route, etc.) only for edge cases:
+    explicit multi-floor disambiguation, detour routing from a mid-route POI, or
+    nearest-type searches (use find_nearest for those).
+    """
+    print("[navigate]")
+    levels = load_map_levels(airport_id)
+
+    # Resolve destination
+    dest_results = search_pois(levels, destination)
+    if not dest_results:
+        msg = ToolMessage(
+            content=f"No location matching '{destination}' found. Try a different spelling or name.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
+
+    best_score = dest_results[0]["_score"]
+    dest_top = [r for r in dest_results if r["_score"] == best_score]
+    unique_names = {r["name"].lower().strip() for r in dest_top}
+    if len(dest_top) > 1 and len(unique_names) == 1:
+        matches_text = "; ".join(
+            f"{r['name']} ({r.get('level', 'unknown floor')})" for r in dest_top
+        )
+        msg = ToolMessage(
+            content=(
+                f"Found {len(dest_top)} places named '{dest_top[0]['name']}' on different floors: {matches_text}. "
+                "Ask the user which floor they need, then call navigate again."
+            ),
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg]})
+
+    dest_poi = dest_top[0]
+    dest_id = dest_poi["id"]
+    dest_display = _display_name(dest_poi)
+
+    # Resolve start — prefer state, then the start arg if provided
+    start_id = state.get("current_location")
+    if start and not start_id:
+        start_results = search_pois(levels, start)
+        if start_results:
+            start_id = start_results[0]["id"]
+
+    if not start_id:
+        msg = ToolMessage(
+            content=(
+                f"Destination set to {dest_display}. "
+                "Ask the user where they are now, then call navigate again once you know."
+            ),
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg], "final_destination": dest_id})
+
+    # Compute route
+    result = dijkstra_multilevel(levels, start_id, dest_id)
+    if not result:
+        msg = ToolMessage(
+            content=f"No route found to {dest_display}.",
+            tool_call_id=tool_call_id,
+        )
+        return Command(update={"messages": [msg], "final_destination": dest_id})
+
+    route_id = str(uuid.uuid4())
+    raw = {
+        "found": True,
+        "stops": [_fmt_stop(i, p) for i, p in enumerate(result["poi_stops"])],
+        "level_changes": result["level_changes"],
+        "segments": [
+            {
+                "level_name": seg["level_name"],
+                "stops": [_fmt_stop(i, p) for i, p in enumerate(seg["stops"])],
+                "portal_out": _fmt_stop(0, seg["portal_out"]) if seg["portal_out"] else None,
+            }
+            for seg in result["segments"]
+        ],
+        "distance": round(result["distance"], 4),
+        "estimated_minutes": max(1, round(result["distance"] * 10)),
+    }
+
+    # Emit trajectory + first checkpoint confirm button
+    _emit_trajectory(raw, route_id, 0, 1)
+    _emit_checkpoint_prompt(raw, route_id, 0, 1)
+
+    eta = raw["estimated_minutes"]
+    n_segs = len(raw["segments"])
+    first_seg_stops = (raw["segments"][0].get("stops") or []) if raw["segments"] else []
+    first_checkpoint = first_seg_stops[1] if len(first_seg_stops) > 1 else None
+    checkpoint_note = (
+        f" First checkpoint: {_display_name(first_checkpoint)} — highlighted on the map."
+        if first_checkpoint else ""
+    )
+    content = (
+        f"Route to {dest_display}: ~{eta} min, "
+        f"{n_segs} floor level{'s' if n_segs != 1 else ''}. "
+        f"Map updated with full trajectory.{checkpoint_note}"
+    )
+
+    existing_intents = list(state.get("active_intents") or [])
+    return Command(update={
+        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id)],
+        "final_destination": dest_id,
+        "current_location": start_id,
+        "last_route": raw,
+        "active_segment_index": 0,
+        "active_stop_index": 1,
+        "route_id": route_id,
+        "active_intents": list({*existing_intents, "navigate"}),
+        "checkpoint_scripts": _generate_checkpoint_scripts(raw, dest_display),
+    })
+
+
 TOOLS = [
+    navigate,
     find_poi,
     get_route,
     get_nodes,

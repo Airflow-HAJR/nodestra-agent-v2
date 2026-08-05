@@ -31,3 +31,4 @@ class State(TypedDict):
     active_segment_index: Optional[int]  # which floor segment of last_route is currently shown on the map
     active_stop_index: Optional[int]  # index of the next unconfirmed checkpoint within that segment's stops
     route_id: Optional[str]  # uuid identifying last_route, so checkpoint events can be matched to the right route
+    checkpoint_scripts: Optional[List[str]]  # pre-written "head toward next stop" messages, consumed one per advance_checkpoint

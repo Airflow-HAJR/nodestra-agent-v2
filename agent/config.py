@@ -13,7 +13,25 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").lower()
 #   FAST — small, fast model for helper nodes (intent, recall, save, summary)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL_MAIN = os.environ.get("OPENAI_MODEL_MAIN", "gpt-4o")
-OPENAI_MODEL_FAST = os.environ.get("OPENAI_MODEL_FAST", "gpt-4o-mini")
+OPENAI_MODEL_FAST = os.environ.get("OPENAI_MODEL_FAST", "gpt-4.1-nano")
+
+# Reasoning models (the gpt-5.6-* family: luna/terra/sol) reject function tools
+# on /v1/chat/completions unless reasoning is disabled — the agent binds TOOLS,
+# so this must be 'none' for them. For the voice agent we want reasoning off
+# anyway (latency). Leave EMPTY for non-reasoning models like gpt-4o, which
+# don't accept the parameter at all and would 400 if it were sent.
+OPENAI_MAIN_REASONING_EFFORT = os.environ.get("OPENAI_MAIN_REASONING_EFFORT", "")
+
+# Groq — powers the FAST tier (helper nodes: intent, recall, save, format) when a
+# key is set. Runs Llama on LPU hardware at ~750 tok/s, so a one-sentence reply
+# comes back in ~100-250ms vs a hosted GPT's 400-700ms. OpenAI-API-compatible, so
+# it's just a base_url swap. Falls back to OPENAI_MODEL_FAST when unset.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL_FAST = os.environ.get("GROQ_MODEL_FAST", "llama-3.1-8b-instant")
+GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+
+# The model name shown in latency breakdowns for the fast tier — whichever is live.
+FAST_LLM_LABEL = GROQ_MODEL_FAST if GROQ_API_KEY else OPENAI_MODEL_FAST
 
 # Azure OpenAI (optional fallback provider; set LLM_PROVIDER=azure to use)
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")

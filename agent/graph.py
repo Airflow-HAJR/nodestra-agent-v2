@@ -1,4 +1,5 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Iterator, Literal
@@ -203,8 +204,10 @@ def _agent_node(state: State):
             [SystemMessage(content=system), *state["messages"]]
         )
     else:
-        # Reset active_intents each turn so stale intents from prior turns don't pollute routing.
-        # detect_intent and set_nav_state repopulate them for this turn.
+        # active_intents is reset each turn; the navigate/set_nav_state tools
+        # repopulate it, and _derive_phases also infers "navigate" from
+        # final_destination, so the navigation phase survives without a
+        # separate intent-classification LLM call.
         response = _llm_with_tools.invoke([
             SystemMessage(content=system),
             *state["messages"],
@@ -216,179 +219,44 @@ def _agent_node(state: State):
     return {"messages": [response], "last_error": None, "active_intents": []}
 
 
-# ================= error handling =================
+# ================= post-tool routing =================
 
-def _check_tool_errors(state: State) -> Literal["repair", "agent"]:
+def _check_tool_errors(state: State) -> Literal["agent", "checkpoint_reply"]:
+    """After tools run, decide where to go next.
+
+    - advance_checkpoint with a pre-written script queued -> checkpoint_reply
+      (zero LLM: the "head toward the next stop" line was written by navigate).
+    - everything else -> back to the agent, which reads the tool result (errors
+      included, since the error text is in the ToolMessage) and writes the reply.
+
+    There is no separate repair/format tier anymore: the agent model is capable
+    enough to both recover from a tool error and verbalize a tool result itself,
+    so paying for extra LLM nodes to do those jobs was pure latency.
+    """
     for msg in reversed(state["messages"]):
         if not isinstance(msg, ToolMessage):
             break
-        if getattr(msg, "status", None) == "error":
-            return "repair"
-        content = msg.content if isinstance(msg.content, str) else str(msg.content)
-        if content.strip().lower().startswith("error"):
-            return "repair"
+        if msg.name == "advance_checkpoint" and state.get("checkpoint_scripts"):
+            return "checkpoint_reply"
     return "agent"
 
 
-def _repair_node(state: State):
-    err = "Unknown tool failure"
-    for msg in reversed(state["messages"]):
-        if isinstance(msg, ToolMessage):
-            err = msg.content if isinstance(msg.content, str) else str(msg.content)
-            break
-    print("[thinking]")
-    return {"last_error": err[:300]}
+def _checkpoint_reply_node(state: State) -> dict:
+    """Return the next pre-scripted checkpoint message without calling the LLM.
 
-
-# ================= intent detection =================
-
-_INTENT_SYSTEM = """\
-You are an intent classifier for an airport voice assistant.
-
-Classify the intent of the LAST USER MESSAGE only. Use prior conversation only to resolve ambiguous references \
-(e.g. "it", "there", "that place", "yeah let's do it") — do not re-classify intents that were already handled \
-in earlier turns.
-
-Intents:
-- navigate: user wants to go somewhere or get directions — includes confirmations like "yeah let's do it" \
-or "take me there" when the prior assistant turn offered navigation
-- food_drinks: user is actively requesting food or drink recommendations (not already in progress)
-- shopping: user wants to buy something or find a specific shop
-- lounge_access: user is asking about airport lounges
-- payment: user is asking about payment methods, cards, or rewards
-- flight_info: user is asking about flight status, gate, boarding, or delays
-- accessibility: user has mobility needs or is asking about wheelchair/elevator access
-- ground_transport: user is asking about taxis, rideshare, BART, or airport shuttles
-- baggage: user is asking about luggage or bag claim
-- wellness: user is looking for a spa, quiet room, chapel, or relaxation space
-- charging_connectivity: user needs device charging, wifi, or a power outlet
-- family_services: user needs family restrooms, play area, or stroller info
-
-Return {"intents": []} for simple acknowledgements with no new request ("okay thanks", "got it", "sounds good").
-
-Respond with JSON only.\
-"""
-
-class _IntentResult(_PydanticBase):
-    intents: list[str]
-
-_intent_classifier = None
-
-
-def _get_intent_classifier():
-    global _intent_classifier
-    if _intent_classifier is None:
-        _intent_classifier = build_llm(fast=True).with_structured_output(_IntentResult, method="json_mode")
-    return _intent_classifier
-
-
-def _detect_intents(messages: list) -> list[str]:
-    """Use the LLM to classify the user's intent given recent conversation context."""
-    # Build a compact context string from the last 4 messages so short replies like
-    # "yeah let's do it" are understood relative to what was just discussed.
-    context_lines: list[str] = []
-    for msg in messages[-4:]:
-        if isinstance(msg, HumanMessage):
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            context_lines.append(f"User: {content}")
-        elif isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
-            content = msg.content if isinstance(msg.content, str) else str(msg.content)
-            context_lines.append(f"Assistant: {content[:200]}")
-    context = "\n".join(context_lines)
-    try:
-        result = _get_intent_classifier().invoke([
-            SystemMessage(content=_INTENT_SYSTEM),
-            HumanMessage(content=context),
-        ])
-        return result.intents if result else []
-    except Exception as e:
-        print(f"[intent detection failed: {e}]")
-        return []
-
-
-def _detect_intent_node(state: State) -> dict:
-    """Classify the user's intent so PHASE_FOCUS renders the right instructions.
-    Sets active_intents; does not touch memory."""
-    detected = _detect_intents(state["messages"])
-    existing = list(state.get("active_intents") or [])
-    merged_intents = list({*existing, *detected})
-    print(f"[intents detected: {detected or 'none'}]")
-    return {"active_intents": merged_intents}
-
-
-# ================= memory recall =================
-
-_MEMORY_SELECT_SYSTEM = """\
-You help an airport assistant decide which of the things it remembers about a user \
-are useful for the user's LATEST message.
-
-You are given the user's stored memories and their latest message. Return the subset \
-of those memories (copied verbatim) that would help you respond well.
-
-Guidance:
-- If the user is asking what you know / remember about them, return ALL memories.
-- Include a memory if it should shape your answer (e.g. they ask about food and you \
-know a dietary restriction; they ask for directions and you know a mobility need).
-- If nothing is relevant, return an empty list.
-
-Respond with JSON only: {"relevant": ["<memory text>", ...]}\
-"""
-
-
-class _RelevantMemories(_PydanticBase):
-    relevant: list[str]
-
-
-_memory_selector = None
-
-
-def _get_memory_selector():
-    global _memory_selector
-    if _memory_selector is None:
-        _memory_selector = build_llm(fast=True).with_structured_output(
-            _RelevantMemories, method="json_mode"
-        )
-    return _memory_selector
-
-
-def _memory_recall_node(state: State) -> dict:
-    """Look at everything we remember about the user (loaded once at session start)
-    and pick the subset relevant to their latest message. The chosen memories are
-    surfaced prominently in the system prompt so the agent actually uses them."""
-    if not MEMORY_ENABLED:
+    Pops the first entry from checkpoint_scripts (written by navigate at route-compute
+    time) and returns it directly as the agent's reply. This eliminates the second
+    main-LLM call that would otherwise turn an advance_checkpoint result into a
+    'now head toward X' message.
+    """
+    scripts = list(state.get("checkpoint_scripts") or [])
+    if not scripts:
         return {}
-    memories = state.get("user_memories") or []
-    if not memories:
-        return {"relevant_memories": []}
-
-    last_user = None
-    for m in reversed(state["messages"]):
-        if isinstance(m, HumanMessage):
-            last_user = m.content if isinstance(m.content, str) else str(m.content)
-            break
-    if not last_user:
-        return {"relevant_memories": []}
-
-    listing = "\n".join(f"- {m['content']}" for m in memories)
-    try:
-        t0 = time.time()
-        result = _get_memory_selector().invoke([
-            SystemMessage(content=_MEMORY_SELECT_SYSTEM),
-            HumanMessage(content=f"Stored memories:\n{listing}\n\nUser's latest message: \"{last_user}\""),
-        ])
-        add_llm(time.time() - t0)
-    except Exception as e:
-        print(f"[memory recall failed: {e}]")
-        return {"relevant_memories": memories}  # safe fallback: give the agent everything
-
-    chosen = [c.strip().lower() for c in (result.relevant or [])]
-    relevant = [
-        m for m in memories
-        if any(m["content"].strip().lower() == c or m["content"].strip().lower() in c or c in m["content"].strip().lower()
-               for c in chosen)
-    ]
-    print(f"[memory recall: {[m['content'] for m in relevant] or 'nothing relevant'}]")
-    return {"relevant_memories": relevant}
+    print(f"[checkpoint fast-path: '{scripts[0][:60]}...']")
+    return {
+        "messages": [AIMessage(content=scripts[0])],
+        "checkpoint_scripts": scripts[1:],
+    }
 
 
 # ================= memory extraction (save) =================
@@ -431,38 +299,47 @@ def _get_memory_extractor():
     global _memory_extractor
     if _memory_extractor is None:
         _memory_extractor = build_llm(fast=True).with_structured_output(
-            _MemoryExtraction, method="json_mode"
+            _MemoryExtraction, method="function_calling"
         )
     return _memory_extractor
 
 
-def _memory_extract_node(state: State) -> dict:
-    """After the agent's final answer, decide if the user's last message held a
-    durable fact. If so, persist it and append it to the session cache so it's
-    recallable for the rest of this call without re-querying the DB.
+# Memory saving happens ENTIRELY off the critical path. The reply is already
+# back in the user's hands; a background worker then decides whether the last
+# message held a durable fact, persists it, and patches it into the thread's
+# checkpoint so the next turn's prompt includes it. Zero LLM calls on the turn
+# itself — that's the whole point.
+_MEMORY_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mem-save")
 
-    Guests go through exactly the same extraction — the agent should be able to
-    act on "I'm vegetarian" five minutes later whether or not anyone signed in —
-    but their facts stop at the session cache and are never written to the
-    database. That difference is the whole reason to have an account, and it
-    also means a shared airport kiosk doesn't quietly build a profile of
-    everyone who walks up to it.
+
+def _extract_and_persist(config: dict, state: dict) -> None:
+    """Background: extract durable facts from the last user message and save them.
+
+    Runs after the turn has already returned, so nothing here is timed or blocks
+    the user. When a fact is found it's written to the DB (signed-in users only)
+    and merged into the thread checkpoint via graph.update_state, so the next
+    turn's system prompt carries it. Guests get the checkpoint update but no DB
+    write — the fact lives for the session and no longer.
     """
     if not MEMORY_ENABLED:
-        return {}
+        return
     user_id = state.get("user_id")
     if not user_id:
-        return {}
+        return
     persist = bool(state.get("persist_memory"))
 
     last_user = None
-    for m in reversed(state["messages"]):
+    for m in reversed(state.get("messages", [])):
         if isinstance(m, HumanMessage):
             last_user = m.content if isinstance(m.content, str) else str(m.content)
             break
     if not last_user:
-        return {}
+        return
 
+    # No keyword pre-filter — the extraction model itself decides whether the
+    # message holds anything durable. It runs in the background after the reply,
+    # so an extra call costs the user nothing, and a regex gate would silently
+    # miss real facts (typos, unusual phrasings) it never thought to list.
     try:
         result = _get_memory_extractor().invoke([
             SystemMessage(content=_MEMORY_EXTRACT_SYSTEM),
@@ -470,35 +347,39 @@ def _memory_extract_node(state: State) -> dict:
         ])
     except Exception as e:
         print(f"[memory extract failed: {e}]")
-        return {}
-
+        return
     if not result or not result.remember or not result.facts:
-        return {}
+        return
 
     cached = list(state.get("user_memories") or [])
     saved = 0
     for fact in result.facts:
         content = (fact.content or "").strip()
-        if not content:
-            continue
-        if is_duplicate(cached, content):
-            print(f"[memory: skipped duplicate — {content!r}]")
+        if not content or is_duplicate(cached, content):
             continue
         category = fact.category or "other"
-        if not persist:
-            cached.append({"id": None, "content": content, "category": category, "metadata": {}})
-            saved += 1
-            print(f"[memory: session-only ({category}) — {content!r}]")
-            continue
-        t0 = time.time()
-        row = vm_add_memory(user_id, content, category)
-        add_memory(time.time() - t0)
-        if row:
-            cached.append(row)
-            saved += 1
-            print(f"[memory: saved ({row['category']}) — {row['content']!r}]")
+        row = None
+        if persist:
+            try:
+                row = vm_add_memory(user_id, content, category)
+            except Exception as e:
+                print(f"[memory: DB write failed — {e}]")
+        cached.append(row or {"id": None, "content": content, "category": category, "metadata": {}})
+        saved += 1
+        print(f"[memory: saved ({category}, {'db' if row else 'session'}) — {content!r}]")
 
-    return {"user_memories": cached} if saved else {}
+    if saved:
+        try:
+            graph.update_state(config, {"user_memories": cached})
+        except Exception as e:
+            print(f"[memory: checkpoint update failed — {e}]")
+
+
+def save_memory_in_background(config: dict, result: dict) -> None:
+    """Fire-and-forget memory extraction for a just-completed turn. Call this
+    after graph.invoke() returns — it never blocks and adds no LLM call to the
+    turn the user is waiting on."""
+    _MEMORY_POOL.submit(_extract_and_persist, config, dict(result))
 
 
 # ================= subgraph builder =================
@@ -677,36 +558,38 @@ def _timed_tools(state: State):
     return result
 
 
-def _after_agent_router(state: State) -> Literal["tools", "save_memory"]:
-    """Tool-call turns go to the tools node; a final answer goes to save_memory
-    (which decides what, if anything, to remember) before ending."""
+def _after_agent_router(state: State) -> Literal["tools", "end"]:
+    """Tool-call turns go to the tools node; a final answer ends the turn.
+    Memory saving is NOT a node — it runs in the background after invoke()."""
     last = state["messages"][-1]
-    if getattr(last, "tool_calls", None):
-        return "tools"
-    return "save_memory"
+    return "tools" if getattr(last, "tool_calls", None) else "end"
 
 
 def _build_subgraph():
+    """Minimal agent loop — the agent (Luna) does everything: tool selection,
+    error recovery, and writing the reply. The only other node is the zero-LLM
+    checkpoint reply. Memory extraction happens off-graph, in the background,
+    after the turn returns (see save_memory_in_background).
+
+        START -> agent -> END
+                   \\-> tools -> agent -> END
+                          \\-> checkpoint_reply -> END
+    """
     builder = StateGraph(State)
-    builder.add_node("detect_intent", _detect_intent_node)
-    builder.add_node("recall_memory", _memory_recall_node)
     builder.add_node("agent", _agent_node)
     builder.add_node("tools", _timed_tools)
-    builder.add_node("repair", _repair_node)
-    builder.add_node("save_memory", _memory_extract_node)
+    builder.add_node("checkpoint_reply", _checkpoint_reply_node)
 
-    builder.add_edge(START, "detect_intent")
-    builder.add_edge("detect_intent", "recall_memory")
-    builder.add_edge("recall_memory", "agent")
+    builder.add_edge(START, "agent")
     builder.add_conditional_edges(
         "agent", _after_agent_router,
-        {"tools": "tools", "save_memory": "save_memory"},
+        {"tools": "tools", "end": END},
     )
-    builder.add_edge("save_memory", END)
     builder.add_conditional_edges(
-        "tools", _check_tool_errors, {"repair": "repair", "agent": "agent"}
+        "tools", _check_tool_errors,
+        {"agent": "agent", "checkpoint_reply": "checkpoint_reply"},
     )
-    builder.add_edge("repair", "agent")
+    builder.add_edge("checkpoint_reply", END)
     return builder.compile()
 
 

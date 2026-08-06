@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextvars
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -124,7 +125,21 @@ _twilio = (
     else None
 )
 _validator = RequestValidator(TWILIO_AUTH_TOKEN) if TWILIO_AUTH_TOKEN else None
-_eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY) if ELEVENLABS_API_KEY else None
+# ElevenLabs rejects any key that doesn't start with "sk_" (400,
+# invalid_api_key_prefix) — but the client object builds happily around a stale
+# pre-"sk_" key, so `_eleven` was truthy, _voice_for handed it every language,
+# and every synthesis 400'd. The traveler heard nothing at all. Check the shape
+# here so an unusable key reads as "no ElevenLabs" and Cartesia takes over.
+_eleven = (
+    ElevenLabs(api_key=ELEVENLABS_API_KEY)
+    if ELEVENLABS_API_KEY and ELEVENLABS_API_KEY.startswith("sk_")
+    else None
+)
+if ELEVENLABS_API_KEY and _eleven is None:
+    logger.warning(
+        "ELEVENLABS_API_KEY is not an 'sk_' key — ElevenLabs would reject every "
+        "request, so TTS is falling back to Cartesia."
+    )
 
 # ── Voice selection ───────────────────────────────────────────────────────────
 
@@ -136,8 +151,8 @@ def _norm_lang(lang: str | None) -> str:
     return code or "en"
 
 
-def _voice_for(lang: str | None) -> tuple[str, str]:
-    """Return (provider, voice_id) for speaking `lang`.
+def _voice_order(lang: str | None) -> list[tuple[str, str]]:
+    """Providers to try for `lang`, best first, as (provider, voice_id) pairs.
 
     A reply in Spanish read by an American voice sounds like an American
     reading Spanish, so a voice native to the language wins where we have one:
@@ -150,21 +165,34 @@ def _voice_for(lang: str | None) -> tuple[str, str]:
     meeting a different one. That also keeps every language on the provider
     whose voice the settings sliders can actually steer.
 
-    Cartesia remains the fallback for a deployment with no ElevenLabs key.
+    Every configured provider is listed, not just the winner. A provider that
+    400s or times out used to mean silence, and an agent that says nothing is
+    indistinguishable from a dead one to the traveler — better a voice that
+    isn't the preferred one than no voice at all. The second entry is only ever
+    reached after the first has actually failed.
     """
     code = _norm_lang(lang)
-    eleven_ready = bool(_eleven and ELEVENLABS_VOICE_ID)
-    cartesia_ready = bool(CARTESIA_API_KEY and CARTESIA_VOICE_ID)
+    eleven = ("elevenlabs", ELEVENLABS_VOICE_IDS.get(code) or ELEVENLABS_VOICE_ID)
+    cartesia = ("cartesia", CARTESIA_VOICE_IDS.get(code) or CARTESIA_VOICE_ID)
 
-    # `.get(code) or <default>` is the whole "native voice where we have one,
-    # the multilingual default everywhere else" rule.
-    if TTS_PROVIDER == "elevenlabs" and eleven_ready:
-        return "elevenlabs", ELEVENLABS_VOICE_IDS.get(code) or ELEVENLABS_VOICE_ID
-    if cartesia_ready:
-        return "cartesia", CARTESIA_VOICE_IDS.get(code) or CARTESIA_VOICE_ID
-    if eleven_ready:
-        return "elevenlabs", ELEVENLABS_VOICE_IDS.get(code) or ELEVENLABS_VOICE_ID
-    return "cartesia", CARTESIA_VOICE_ID
+    ready: list[tuple[str, str]] = []
+    if _eleven and ELEVENLABS_VOICE_ID:
+        ready.append(eleven)
+    if CARTESIA_API_KEY and CARTESIA_VOICE_ID:
+        ready.append(cartesia)
+    if not ready:
+        return [cartesia]
+
+    # `.get(code) or <default>` above is the whole "native voice where we have
+    # one, the multilingual default everywhere else" rule; the sort below is
+    # just the configured preference, with the other provider kept as backup.
+    ready.sort(key=lambda pv: pv[0] != TTS_PROVIDER)
+    return ready
+
+
+def _voice_for(lang: str | None) -> tuple[str, str]:
+    """The provider we'd rather speak `lang` with. See _voice_order."""
+    return _voice_order(lang)[0]
 
 
 # ── ElevenLabs TTS ────────────────────────────────────────────────────────────
@@ -355,17 +383,34 @@ def _cartesia_tts_mulaw_iter(text: str, lang: str = "en", voice_id: str | None =
 # ── TTS dispatch ──────────────────────────────────────────────────────────────
 
 def _tts_mp3_url(text: str, lang: str = "en") -> str | None:
-    provider, voice_id = _voice_for(lang)
-    if provider == "cartesia":
-        return _cartesia_tts_mp3_url(text, lang, voice_id)
-    return _elevenlabs_tts_mp3_url(text, lang, voice_id)
+    for provider, voice_id in _voice_order(lang):
+        synth = _cartesia_tts_mp3_url if provider == "cartesia" else _elevenlabs_tts_mp3_url
+        url = synth(text, lang, voice_id)
+        if url:
+            return url
+    return None
 
 
 def _tts_mulaw_iter(text: str, lang: str = "en"):
-    provider, voice_id = _voice_for(lang)
-    if provider == "cartesia":
-        return _cartesia_tts_mulaw_iter(text, lang, voice_id)
-    return _elevenlabs_tts_mulaw_iter(text, lang, voice_id)
+    """Yield mulaw 8 kHz chunks, falling through to the next provider if one
+    produces nothing.
+
+    The first chunk is pulled eagerly: the ElevenLabs path returns a lazy
+    generator that only raises once iterated, so a provider that fails on its
+    opening byte has to be caught here — after the caller starts streaming to
+    Twilio it's too late to switch.
+    """
+    for provider, voice_id in _voice_order(lang):
+        synth = _cartesia_tts_mulaw_iter if provider == "cartesia" else _elevenlabs_tts_mulaw_iter
+        try:
+            chunks = iter(synth(text, lang, voice_id))
+            first = next(chunks, None)
+        except Exception as e:
+            logger.error(f"TTS (mulaw) failed via {provider}: {e}")
+            continue
+        if first is not None:
+            return itertools.chain([first], chunks)
+    return iter([])
 
 
 # ── Request deduplication ─────────────────────────────────────────────────────
@@ -1145,36 +1190,42 @@ async def web_stream(ws: WebSocket):
         """Generate MP3 bytes in the voice that matches `lang`.
 
         Voice selection (and thus accent) follows the language being spoken,
-        not the session's configured provider — see _voice_for.
+        not the session's configured provider — see _voice_order. Every
+        configured provider is tried in turn: returning None here is what the
+        traveler experiences as an agent that greets them silently and then
+        drops straight back to listening, so the preferred voice failing must
+        not be the end of it.
         """
         spoken = _norm_lang(lang or language)
-        provider, voice_id = _voice_for(spoken)
         # Read once per call: a slider moved mid-sentence should land on the
         # next thing spoken, not retune this one halfway through.
         tuning = voice_tuning
-        try:
-            if provider == "elevenlabs":
-                return await loop.run_in_executor(
+        for provider, voice_id in _voice_order(spoken):
+            try:
+                if provider == "elevenlabs":
+                    return await loop.run_in_executor(
+                        _executor,
+                        lambda vid=voice_id: _elevenlabs_tts_bytes(
+                            text, spoken, "mp3_44100_128", vid, tuning
+                        ),
+                    )
+                resp = await loop.run_in_executor(
                     _executor,
-                    lambda: _elevenlabs_tts_bytes(text, spoken, "mp3_44100_128", voice_id, tuning),
+                    lambda vid=voice_id: _requests.post(
+                        _CARTESIA_URL,
+                        headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
+                        json=_cartesia_payload(
+                            text, spoken,
+                            {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
+                            vid, tuning,
+                        ),
+                        timeout=15,
+                    )
                 )
-            resp = await loop.run_in_executor(
-                _executor,
-                lambda: _requests.post(
-                    _CARTESIA_URL,
-                    headers={**_CARTESIA_HEADERS, "X-API-Key": CARTESIA_API_KEY},
-                    json=_cartesia_payload(
-                        text, spoken,
-                        {"container": "mp3", "encoding": "mp3", "sample_rate": 44100},
-                        voice_id, tuning,
-                    ),
-                    timeout=15,
-                )
-            )
-            resp.raise_for_status()
-            return resp.content
-        except Exception as e:
-            logger.error(f"TTS failed [{spoken} via {provider}]: {e}")
+                resp.raise_for_status()
+                return resp.content
+            except Exception as e:
+                logger.error(f"TTS failed [{spoken} via {provider}]: {e}")
         return None
 
     async def _run_turn(user_text: str) -> None:

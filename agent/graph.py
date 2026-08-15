@@ -62,8 +62,23 @@ _TOOL_SPEAK_MESSAGES: dict[str, list[str]] = {
         "Setting up flight tracking for you.",
         "Registering your flight alert.",
     ],
+    "search_places": [
+        "Let me find something that works for you.",
+        "Checking what's available.",
+        "Looking that up for you.",
+    ],
+    "suggest_places": [
+        "Let me see what's near you.",
+        "Checking what's around right now.",
+        "Finding a few options nearby.",
+    ],
+    "lookup_poi_info": [
+        "Let me check that for each of them.",
+        "Looking into what they actually serve.",
+        "Checking the details on those.",
+    ],
 }
-_TOOL_SPEAK_PRIORITY = ["get_route", "find_nearest", "find_poi", "resolve_poi", "get_nodes", "track_flight_changes"]
+_TOOL_SPEAK_PRIORITY = ["get_route", "suggest_places", "lookup_poi_info", "find_nearest", "find_poi", "resolve_poi", "get_nodes", "search_places", "track_flight_changes"]
 _FALLBACK_SPEAK_MESSAGES = [
     "Let me check that for you.",
     "One moment while I look that up.",

@@ -36,7 +36,9 @@ GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"
 # The model name shown in latency breakdowns for the fast tier — whichever is live.
 FAST_LLM_LABEL = GROQ_MODEL_FAST if GROQ_API_KEY else OPENAI_MODEL_FAST
 
-# Azure OpenAI (optional fallback provider; set LLM_PROVIDER=azure to use)
+# Azure OpenAI (active provider when LLM_PROVIDER=azure). One deployment serves
+# both LLM tiers; for a gpt-5.6-* reasoning deployment (Luna) set
+# OPENAI_MAIN_REASONING_EFFORT=none so it can bind tools.
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")

@@ -75,12 +75,21 @@ def build_llm(fast: bool = False):
     back to the OpenAI fast model when no Groq key is configured.
     """
     if LLM_PROVIDER == "azure":
-        # Azure exposes one deployment per config; both tiers use it.
+        # Azure exposes one deployment per config; both tiers use it. When that
+        # deployment is a reasoning model (gpt-5.6-* like Luna), it rejects
+        # function tools on chat completions unless reasoning_effort is set — and
+        # the agent binds TOOLS — so pass it through exactly as the OpenAI path
+        # does. Left empty for non-reasoning deployments (e.g. gpt-4o), which
+        # would 400 on the param.
+        azure_kwargs: dict = {}
+        if OPENAI_MAIN_REASONING_EFFORT:
+            azure_kwargs["reasoning_effort"] = OPENAI_MAIN_REASONING_EFFORT
         return AzureChatOpenAI(
             azure_deployment=AZURE_OPENAI_DEPLOYMENT,
             azure_endpoint=AZURE_OPENAI_ENDPOINT,
             api_key=SecretStr(AZURE_OPENAI_API_KEY),
             api_version=AZURE_OPENAI_API_VERSION,
+            **azure_kwargs,
         )
     if fast and GROQ_API_KEY:
         return ChatOpenAI(

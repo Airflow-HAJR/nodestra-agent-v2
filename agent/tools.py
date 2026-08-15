@@ -1,3 +1,4 @@
+import logging
 import uuid
 from typing import Annotated, List, Optional
 
@@ -10,7 +11,15 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from agent.config import DEFAULT_AIRPORT, GATEGETTER_URL
-from agent.db import load_map_levels
+from agent.db import (
+    get_service_client as _get_supabase,
+    is_network_error,
+    mark_supabase_unreachable,
+    supabase_ok,
+    load_map_levels,
+)
+
+logger = logging.getLogger(__name__)
 from agent.map_engine import (
     dijkstra_multilevel,
     fmt_poi,
@@ -633,6 +642,56 @@ def end_call(
 
 
 # ---------------------------------------------------------------------------
+# Place search — RAG over poi_metadata (tag-filtered, no embeddings)
+# ---------------------------------------------------------------------------
+
+class SearchPlacesInput(BaseModel):
+    category: str = Field(
+        description="Category to search: 'food', 'shop', 'lounge', or 'service'"
+    )
+    tags: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Tags that EVERY result must have. Derive from user memories — e.g. "
+            "['halal'] if they only eat halal, ['vegan'] if vegan, "
+            "['amex-platinum'] to find lounge access. Omit to return all places in the category."
+        ),
+    )
+
+
+@tool(args_schema=SearchPlacesInput)
+def search_places(category: str, tags: Optional[List[str]] = None) -> list:
+    """Find airport places by category and preference tags.
+
+    Use whenever the user asks about food, drinks, shops, or lounges.
+    ALWAYS cross-reference the user's stored memories to set tags — e.g. if
+    they only eat halal, pass tags=['halal']. Returns poi_id, name, and tags
+    for each match so you can name the options and offer to navigate there via
+    navigate(destination=<name>).
+    """
+    if not supabase_ok():
+        return []
+    try:
+        result = (
+            _get_supabase()
+            .table("poi_metadata")
+            .select("poi_id, name, tags")
+            .eq("category", category)
+            .execute()
+        )
+        rows = result.data or []
+        if tags:
+            required = {t.lower() for t in tags}
+            rows = [r for r in rows if required.issubset(set(r.get("tags") or []))]
+        return rows
+    except Exception as exc:
+        if is_network_error(exc):
+            mark_supabase_unreachable()
+        logger.exception("search_places failed")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # User memory
 # ---------------------------------------------------------------------------
 # There are no recall/save memory tools. Memory is handled by dedicated graph
@@ -891,5 +950,15 @@ TOOLS = [
     # get_flight_status,  # enable when GateGetter server is running
     end_call,
     track_flight_changes,
+    # search_places is defined above but deliberately NOT bound right now.
+    # Its `poi_metadata` rows don't line up with the map graph — none of the 40
+    # poi_ids or names in that table exists in the OAK graph the router walks —
+    # so anything it recommends ("Chilis Grill & Bar T1") is a place the agent
+    # then can't route the traveler to. suggest_places covers the same ask
+    # against POIs that are actually on the map. Re-enable this the moment
+    # poi_metadata is keyed to real graph ids; its tag vocabulary
+    # (amex-platinum, wheelchair-accessible) is richer than anything in
+    # data/poi_knowledge.json and worth having back.
+    # search_places,
     *MAP_TOOLS,
 ]

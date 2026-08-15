@@ -165,12 +165,6 @@ GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
 # environment. Seed the account with scripts/seed_demo_memories.py.
 DEMO_USER_ID = os.environ.get("DEMO_USER_ID", "").strip()
 
-# POI id to drop a web session's traveler at on its first turn, e.g.
-# "security-4RXW" (Terminal 1 Security). Saves the demo a turn of "and where
-# are you right now?". Unset in any real deployment — a traveler's location
-# should come from the conversation or GPS, not a config file.
-DEMO_START_POI = os.environ.get("DEMO_START_POI", "").strip()
-
 # Feature flags
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"
 FLIGHT_HYDRATION_ENABLED = os.environ.get("FLIGHT_HYDRATION_ENABLED", "false").lower() == "true"

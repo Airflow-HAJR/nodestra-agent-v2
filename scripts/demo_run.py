@@ -36,15 +36,15 @@ from agent.poi_rag import warm_index  # noqa: E402
 
 DEMO_USER_ID = "+15105550142"
 
-# Terminal 1 Security — a real POI id in the OAK map graph, seeded as the
-# traveler's starting point so the first turn doesn't open with "where are
-# you?". Chosen over a gate because the walk from here to the food court runs
-# through five named checkpoints, which is what makes the navigation half of
-# the demo visible.
-DEMO_START_POI = "security-4RXW"
+# Nothing is seeded: the agent starts out not knowing where the traveler is,
+# says so, and asks — which is the honest state of things, since a phone's GPS
+# can put you in the terminal but not at a gate. --start overrides it if you
+# want to skip that beat.
+DEMO_START_POI = ""
 
 SCRIPT = [
     "hey im really hungry, what's nearby?",
+    "im at terminal 1 security",
     "yeah let's do that one, take me there",
     # Confirming the checkpoint the agent actually named. Saying you're
     # somewhere further along ("I'm at gate 3") makes it advance one step and
@@ -96,7 +96,9 @@ def run_turn(text: str, config: dict, state_seed: dict) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--user", default=DEMO_USER_ID)
-    ap.add_argument("--start", default=DEMO_START_POI, help="POI id the traveler is standing at")
+    ap.add_argument("--start", default=DEMO_START_POI,
+                    help="POI id to pretend the traveler is already standing at (default: unknown, "
+                         "so the agent asks)")
     ap.add_argument("--turn", action="append", help="override the scripted turns (repeatable)")
     ap.add_argument("--guest", action="store_true", help="run as a guest (no stored memories)")
     args = ap.parse_args()
@@ -109,11 +111,9 @@ def main() -> int:
     }
     # Sent on every turn: LangGraph merges these into the checkpointed state, and
     # user_id/persist_memory are what the init node keys memory loading on.
-    seed = {
-        "user_id": args.user,
-        "persist_memory": not args.guest,
-        "current_location": args.start,
-    }
+    seed = {"user_id": args.user, "persist_memory": not args.guest}
+    if args.start:
+        seed["current_location"] = args.start
 
     for text in (args.turn or SCRIPT):
         run_turn(text, config, seed)

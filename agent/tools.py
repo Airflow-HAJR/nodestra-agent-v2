@@ -1,4 +1,5 @@
 import logging
+import json
 import uuid
 from typing import Annotated, List, Optional
 
@@ -298,21 +299,33 @@ class SuggestPlacesInput(BaseModel):
     )
     source: Optional[str] = Field(
         default=None,
-        description="POI id to measure walking distance from. Omit to use the user's current_location.",
+        description="Where to measure walking distance from — a POI id, or the user's own words "
+                    "for where they are ('gate 20', 'near the Peet's', 'just past security'). "
+                    "Omit to use the current_location already in nav state.",
     )
     limit: int = Field(default=3, description="How many options to return (2-4 reads best out loud)")
     airport_id: str = Field(default=DEFAULT_AIRPORT)
 
 
+def _suggest_error(tool_call_id: str, message: str) -> Command:
+    """An early exit from suggest_places. Still a Command, not a bare dict, so
+    every path out of the tool has the same shape."""
+    return Command(update={
+        "messages": [ToolMessage(content=json.dumps({"found": False, "message": message}),
+                                 tool_call_id=tool_call_id)],
+    })
+
+
 @tool(args_schema=SuggestPlacesInput)
 def suggest_places(
     need: str,
+    tool_call_id: Annotated[str, InjectedToolCallId],
     state: Annotated[dict, InjectedState],
     poi_type: str = "restaurant",
     source: Optional[str] = None,
     limit: int = 3,
     airport_id: str = DEFAULT_AIRPORT,
-) -> dict:
+) -> Command:
     """Find several nearby places of a category and describe each one.
 
     Use this — not find_nearest — whenever the user wants OPTIONS rather than
@@ -333,16 +346,29 @@ def suggest_places(
     levels = load_map_levels(airport_id)
     src = source or state.get("current_location")
     if not src:
-        return {
-            "found": False,
-            "message": "I don't know where the user is yet — ask them which gate or area they're near, then call this again.",
-        }
+        return _suggest_error(tool_call_id, (
+            "You don't know where this traveler is standing, and nothing nearby can be ranked "
+            "without that. Tell them you can't pinpoint them inside the terminal and ask where "
+            "they are — a gate number or the nearest shop — then call this again passing their "
+            "answer as `source`."
+        ))
+
+    # `source` arrives as whatever the traveler said ("gate 20", "near the
+    # Peet's") as often as it does a real POI id, because asking someone to
+    # read out an id is not a thing that can happen. Take the id when it is
+    # one, and otherwise resolve the words the same way navigate() does.
     if not any(p["id"] == src for lvl in levels for p in lvl["pois"]):
-        return {"found": False, "message": f"Source POI '{src}' not found — call find_poi to get a valid id."}
+        matches = search_pois(levels, src)
+        if not matches:
+            return _suggest_error(tool_call_id, (
+                f"Couldn't place '{src}' on the map. Ask the traveler for a different landmark "
+                "— a gate number, or a shop or restaurant they can see — and call this again."
+            ))
+        src = matches[0]["id"]
 
     matched_types = matching_poi_types(poi_type, levels)
     if not matched_types:
-        return {"found": False, "message": f"No POIs of type '{poi_type}' at this airport."}
+        return _suggest_error(tool_call_id, f"No POIs of type '{poi_type}' at this airport.")
 
     scored: list[tuple[float, dict, str]] = []
     for lvl in levels:
@@ -355,7 +381,7 @@ def suggest_places(
             scored.append((route["distance"], p, lvl["name"]))
 
     if not scored:
-        return {"found": False, "message": f"Nothing of type '{poi_type}' is reachable from there."}
+        return _suggest_error(tool_call_id, f"Nothing of type '{poi_type}' is reachable from there.")
 
     scored.sort(key=lambda t: t[0])
     limit = max(1, min(limit, 5))
@@ -382,9 +408,14 @@ def suggest_places(
 
     rel_n = _normalize(relevance)
     prox_n = _normalize({p["id"]: -d for d, p, _ in pool})  # negated: closer scores higher
+    # Proximity carries the larger share. An even split let a venue at the far
+    # end of the other terminal outrank one a minute away on a slightly better
+    # text match, which is the wrong trade for someone who just said they're
+    # hungry — at these distances a nine-minute walk has to be *much* more of
+    # what they asked for to be worth naming over something they can see.
     combined = sorted(
         pool_ids,
-        key=lambda pid: 0.5 * rel_n.get(pid, 0.0) + 0.5 * prox_n.get(pid, 0.0),
+        key=lambda pid: 0.35 * rel_n.get(pid, 0.0) + 0.65 * prox_n.get(pid, 0.0),
         reverse=True,
     )[:limit]
     by_id = {p["id"]: (d, p, lvl) for d, p, lvl in pool}
@@ -442,7 +473,14 @@ def suggest_places(
             "poi_ids": [o["poi_id"] for o in options],
         }
 
-    return result
+    # Whatever the traveler just told us about where they are is now the best
+    # answer anyone has, so it becomes current_location. Without this the next
+    # turn ("take me there") finds nav state still empty and asks them where
+    # they are a second time, having just been told.
+    return Command(update={
+        "messages": [ToolMessage(content=json.dumps(result), tool_call_id=tool_call_id)],
+        "current_location": src,
+    })
 
 
 class LookupPOIInfoInput(BaseModel):

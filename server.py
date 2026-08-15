@@ -42,7 +42,6 @@ from agent.config import (
     CARTESIA_VOICE_IDS,
     DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
-    DEMO_START_POI,
     DEMO_USER_ID,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
@@ -524,14 +523,8 @@ def _graph_reply(
     language: str | None = None,
     persist_memory: bool = False,
     user_name: str | None = None,
-    current_location: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
-    if current_location:
-        # Only ever passed on a session's first turn — after that the graph's
-        # own current_location is the live one (advance_checkpoint moves it),
-        # and re-sending would teleport the traveler back to the start.
-        payload["current_location"] = current_location
     if user_id:
         payload["user_id"] = user_id
         # Sent every turn, not just the first: signing in mid-conversation flips
@@ -1079,18 +1072,6 @@ async def web_stream(ws: WebSocket):
             return
         user_id = account.user_id if account else guest_id
 
-    demo_start_pending = bool(DEMO_START_POI)
-
-    def _consume_demo_start() -> str | None:
-        """DEMO_START_POI, once, on the session's first turn — so a demo opens
-        with "what's nearby?" instead of the agent having to ask where the
-        traveler is standing. Returns None on every turn after that."""
-        nonlocal demo_start_pending
-        if not demo_start_pending:
-            return None
-        demo_start_pending = False
-        return DEMO_START_POI
-
     def _persist_memory() -> bool:
         """Whether this session's facts outlive it. Normally that requires a
         verified account; DEMO_USER_ID forces it on so a demo can show what a
@@ -1298,9 +1279,9 @@ async def web_stream(ws: WebSocket):
                     reply = await loop.run_in_executor(
                         _executor,
                         lambda t=user_text, loc=latest_location, lang=language, acct=account,
-                               persist=_persist_memory(), start=_consume_demo_start(): ctx.run(
+                               persist=_persist_memory(): ctx.run(
                             _graph_reply, t, session_id, user_id, loc, lang,
-                            persist, acct.first_name if acct else None, start,
+                            persist, acct.first_name if acct else None,
                         )
                     )
             agent_text = reply["text"]

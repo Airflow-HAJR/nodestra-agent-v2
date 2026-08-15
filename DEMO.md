@@ -44,17 +44,14 @@ Backend:
 
 ```bash
 cd nodestra-agent-v2
-DEMO_USER_ID=+15105550142 DEMO_START_POI=security-4RXW \
-  uv run uvicorn server:app --port 8000
+DEMO_USER_ID=+15105550142 uv run uvicorn server:app --port 8000
 ```
 
 `DEMO_USER_ID` serves every web session as that seeded traveler with durable
 memory on, whether or not anyone signs in — so you don't have to do a Google
 sign-in on stage. **It is an authentication bypass** (anyone opening the page
 gets those memories), so keep it out of any deployed environment. The server
-logs a warning at startup whenever it's set. `DEMO_START_POI` drops the
-traveler at Terminal 1 Security on the first turn, so the demo opens on
-"what's nearby?" instead of the agent asking where they are.
+logs a warning at startup whenever it's set.
 
 Frontend:
 
@@ -67,7 +64,8 @@ npm run dev            # http://localhost:5173/oakland/
 
 | You say | What to point at |
 | --- | --- |
-| "Hey, I'm really hungry — what's nearby?" | Three green pins drop on the map with walking times. The agent names each in one sentence. |
+| "Hey, I'm really hungry — what's nearby?" | It says it can't pinpoint you inside the terminal and asks where you are. That's honest, not a gap: phone GPS puts you in the building, not at a gate, and routing from a guess would send you the wrong way. |
+| "I'm at Terminal 1 security." | Three green pins drop on the map with walking times. The agent names each in one sentence. Any phrasing works — "by gate 3", "right near the Escape Lounge" — the tool resolves the words, and it only asks once. |
 | *(same turn)* | It says "last time you came through OAK you were checking whether places were halal, so I checked all three" — then gives a verdict for **each**, failures included, and recommends the one that passes. That verdict comes from retrieval, not from the model's opinion of a restaurant chain. |
 | "Yeah, take me there." | The map switches to the route: origin, every named stop, destination, ETA, and a "Made it to __" button for the first checkpoint. |
 | "Made it to Lake Merritt Essentials." | Advances one checkpoint, re-highlights the next. Confirm checkpoints **in order** — saying you're somewhere further along advances one step and then points you back at where you already are. |

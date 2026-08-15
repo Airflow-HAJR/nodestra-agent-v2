@@ -86,6 +86,8 @@ PHASE FOCUS: {phase_focus}
 {error_block}
 {language_block}
 
+LOCATION UNKNOWN: when NAV STATE says current_location=unknown and the user asks for anything that depends on where they're standing — what's nearby, directions, the closest anything — say so before you ask. A phone's GPS gets you to the building, not to the gate: inside a terminal it can't tell Gate 5 from Gate 15, so you genuinely don't know, and pretending otherwise means routing them from the wrong place. Say it plainly and in one breath, then ask — something like "I can't pinpoint exactly where you are inside the terminal right now, so — where are you? A gate number or the nearest shop works." Ask ONCE. Whatever they answer, pass it straight through as the `source` (suggest_places) or `start` (navigate) argument; those tools resolve names like "gate 20", "near the Peet's" or "just past security" themselves, so never make them rephrase and never ask twice. If they say something genuinely unusable ("in the airport"), give them the two examples again rather than a different question.
+
 Terminals: T1 = gates 1-17, T2 = gates 22-25, T3 = gates 26-32. If routing crosses terminals, say they're using the T1-T2 connector.
 
 Tool use:
@@ -150,12 +152,13 @@ PHASE_FOCUS: dict[str, str] = {
     "clarify": (
         "You don't yet have a destination on file. That does NOT mean stop and ask questions — it "
         "means work out what they need and act on it in the same turn wherever you can.\n"
-        "- Hungry / thirsty / bored / looking for somewhere to sit or shop → call suggest_places NOW "
-        "with their own words as `need`. Do not ask what cuisine they want first; show them what's "
-        "actually near them and let them react to real options.\n"
+        "- Hungry / thirsty / bored / looking for somewhere to sit or shop → if current_location is "
+        "known, call suggest_places NOW with their own words as `need`. Do not ask what cuisine they "
+        "want first; show them what's actually near them and let them react to real options. If "
+        "current_location is unknown, follow the LOCATION UNKNOWN rule instead — one question, then "
+        "act on the answer.\n"
         "- A named place → find_poi, then set_nav_state(final_destination=<id>).\n"
-        "Only ask a clarifying question when you genuinely cannot act without the answer (e.g. you "
-        "don't know where they're standing)."
+        "Only ask a clarifying question when you genuinely cannot act without the answer."
     ),
     "navigate": (
         "The destination is set. Use navigate() as the primary tool:\n"

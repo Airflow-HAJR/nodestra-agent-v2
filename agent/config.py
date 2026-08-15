@@ -14,6 +14,9 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").lower()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL_MAIN = os.environ.get("OPENAI_MODEL_MAIN", "gpt-4o")
 OPENAI_MODEL_FAST = os.environ.get("OPENAI_MODEL_FAST", "gpt-4.1-nano")
+# Embedding model behind POI retrieval (agent/poi_rag.py). Unset + no key means
+# retrieval falls back to keyword matching rather than being unavailable.
+OPENAI_EMBEDDING_MODEL = os.environ.get("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 # Reasoning models (the gpt-5.6-* family: luna/terra/sol) reject function tools
 # on /v1/chat/completions unless reasoning is disabled — the agent binds TOOLS,
@@ -38,6 +41,7 @@ AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "")
 
 # Supabase (map data)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -147,6 +151,23 @@ ELEVENLABS_VOICE_IDS = _voice_overrides("ELEVENLABS_VOICE_ID", ELEVENLABS_VOICE_
 
 # GateGetter service URL (flight tracking)
 GATEGETTER_URL = os.environ.get("GATEGETTER_URL", "http://localhost:8081")
+
+# ── Demo identity ─────────────────────────────────────────────────────────────
+# When set, every /web/stream session is treated as this user id with durable
+# memory on, regardless of whether anyone signed in. This exists so a demo can
+# show a *returning* traveler — the agent recognizing a preference it picked up
+# on an earlier trip — without a Google sign-in on stage.
+#
+# It is an authentication bypass by construction: anyone who opens the page gets
+# that user's memories. Only ever set it locally, never in a deployed
+# environment. Seed the account with scripts/seed_demo_memories.py.
+DEMO_USER_ID = os.environ.get("DEMO_USER_ID", "").strip()
+
+# POI id to drop a web session's traveler at on its first turn, e.g.
+# "security-4RXW" (Terminal 1 Security). Saves the demo a turn of "and where
+# are you right now?". Unset in any real deployment — a traveler's location
+# should come from the conversation or GPS, not a config file.
+DEMO_START_POI = os.environ.get("DEMO_START_POI", "").strip()
 
 # Feature flags
 MEMORY_ENABLED = os.environ.get("MEMORY_ENABLED", "true").lower() == "true"

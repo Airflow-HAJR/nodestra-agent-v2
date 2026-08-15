@@ -24,6 +24,11 @@ Set these for Twilio local hosting:
 - `ELEVENLABS_API_KEY`
 - `SERVER_BASE_URL` (public tunnel URL while running locally)
 
+## Demo
+
+`DEMO.md` — the memory + retrieval + navigation walkthrough: seed a returning
+traveler, rehearse the conversation headlessly, then run it with the map.
+
 ## Text Test UI (no voice)
 
 A minimal browser chat for testing the agent + semantic memory system without

@@ -1,0 +1,235 @@
+{
+  "_note": "SYNTHETIC DEMO DATA. These write-ups are invented for the Nodestra demo and are NOT sourced from OAK, the venues, or any certifying body. poi_id values do map to real rows in the Supabase OAK map graph so retrieved facts can be pinned and routed to. Replace this file with scraped/licensed venue data before showing anything to a real traveler.",
+  "airport_id": "OAK",
+  "docs": [
+    {
+      "poi_id": "restaurant-8RHV",
+      "name": "A16 Pizza",
+      "section": "overview",
+      "text": "A16 Pizza is a sit-down Neapolitan pizzeria in Terminal 1 near Gate 8A, an outpost of the San Francisco restaurant. Wood-fired pies cooked to order in about 9 minutes, plus antipasti and a short Italian wine list. Counter seating for 18 and a small bar. Typical spend $22-30 per person."
+    },
+    {
+      "poi_id": "restaurant-8RHV",
+      "name": "A16 Pizza",
+      "section": "menu",
+      "text": "A16 Pizza menu: Margherita, Marinara, Diavola with spicy soppressata, Prosciutto e Rucola, and a quattro formaggi. Sides include a chopped salad, meatballs in sugo, and garlic knots. Draft Italian lagers and Campari spritzes at the bar."
+    },
+    {
+      "poi_id": "restaurant-8RHV",
+      "name": "A16 Pizza",
+      "section": "dietary",
+      "text": "A16 Pizza dietary information: NOT halal and holds no halal certification. Several signature pies use pork (soppressata, prosciutto, pancetta) and the kitchen shares prep surfaces and a single wood oven across all pizzas, so there is no pork-free preparation line. Vegetarian options are good — Margherita, Marinara and quattro formaggi are meat-free. A gluten-free crust is available for a $4 upcharge but is baked in the same oven. Alcohol is served on the premises."
+    },
+    {
+      "poi_id": "restaurant-8RHV",
+      "name": "A16 Pizza",
+      "section": "hours",
+      "text": "A16 Pizza hours: 6:00am to 9:30pm daily, kitchen closes at 9:00pm. Located airside in Terminal 1 between Gate 8A and Gate 10. Roughly a 2 minute walk from Gate 5."
+    },
+
+    {
+      "poi_id": "restaurant-0J7E",
+      "name": "Cancun Sabor Mexicano",
+      "section": "overview",
+      "text": "Cancun Sabor Mexicano is a fast-casual Mexican taqueria in Terminal 1 near Gate 9. Build-your-own burritos, tacos, bowls and quesadillas down a counter line, with salsas and a guacamole bar. Order-to-hand time is usually 4-6 minutes, which makes it the fastest full meal in this concourse. Typical spend $14-19 per person."
+    },
+    {
+      "poi_id": "restaurant-0J7E",
+      "name": "Cancun Sabor Mexicano",
+      "section": "menu",
+      "text": "Cancun Sabor Mexicano menu: carne asada, pollo asado, al pastor, carnitas, grilled shrimp, and a roasted vegetable and black bean filling. Served as tacos, burritos, bowls or quesadillas. House salsas from mild pico de gallo to habanero. Horchata, agua fresca, Mexican Coke, and bottled beer."
+    },
+    {
+      "poi_id": "restaurant-0J7E",
+      "name": "Cancun Sabor Mexicano",
+      "section": "dietary",
+      "text": "Cancun Sabor Mexicano dietary information: HALAL. All beef, chicken and lamb are halal-certified (Islamic Food and Nutrition Council of America), and the certificate is posted at the register. Carnitas is the one pork item on the line; it is cooked and held in a separate sealed well with dedicated tongs and its own cutting board, so the halal proteins are not cross-contaminated. Ask staff for a fresh-glove preparation and they will do it. Vegetarian and vegan builds are available (roasted vegetable, black bean, guacamole, no cheese or crema). Beer is sold but is kept behind the register, not on the food line."
+    },
+    {
+      "poi_id": "restaurant-0J7E",
+      "name": "Cancun Sabor Mexicano",
+      "section": "hours",
+      "text": "Cancun Sabor Mexicano hours: 5:00am to 10:00pm daily. Located airside in Terminal 1 across from Gate 9, next to the Gate 9A seating bank. Roughly a 3 minute walk from Gate 5."
+    },
+
+    {
+      "poi_id": "restaurant-S3UU",
+      "name": "OAK Clubhouse",
+      "section": "overview",
+      "text": "OAK Clubhouse is a full-service American sports bar and grill in Terminal 1 near Gate 6, with table service, 14 screens, and a long bar. Table turn time runs 25-40 minutes, so it suits a long layover more than a tight connection. Typical spend $26-38 per person."
+    },
+    {
+      "poi_id": "restaurant-S3UU",
+      "name": "OAK Clubhouse",
+      "section": "menu",
+      "text": "OAK Clubhouse menu: smash burgers, buttermilk fried chicken sandwich, bacon cheeseburger, Buffalo wings, loaded nachos, Caesar salad, and a fish and chips basket. Twenty rotating Bay Area drafts, full cocktail bar, and an all-day breakfast plate with sausage and bacon."
+    },
+    {
+      "poi_id": "restaurant-S3UU",
+      "name": "OAK Clubhouse",
+      "section": "dietary",
+      "text": "OAK Clubhouse dietary information: NOT halal and holds no halal certification. Meat is standard commodity supply, bacon and pork sausage are cooked on the same flat-top as the burgers and chicken, and the fryers are shared. Vegetarian options are limited to the Caesar salad, a black bean burger, and fries; the black bean burger is cooked on the shared flat-top. This is a bar first — alcohol is served throughout and there is no alcohol-free section."
+    },
+    {
+      "poi_id": "restaurant-S3UU",
+      "name": "OAK Clubhouse",
+      "section": "hours",
+      "text": "OAK Clubhouse hours: 6:00am to 11:00pm daily, last kitchen order 10:15pm. Located airside in Terminal 1 near Gate 6 and Gate 4. Roughly a 4 minute walk from Gate 5."
+    },
+
+    {
+      "poi_id": "cafe-X8GJ",
+      "name": "Peet's Coffee",
+      "section": "overview",
+      "text": "Peet's Coffee is a grab-and-go coffee bar in Terminal 1 near Gate 9A. Espresso drinks, cold brew, tea, and a pastry and packaged-snack case. Line moves in 2-4 minutes. Typical spend $6-12 per person. This is a coffee stop, not a meal."
+    },
+    {
+      "poi_id": "cafe-X8GJ",
+      "name": "Peet's Coffee",
+      "section": "dietary",
+      "text": "Peet's Coffee dietary information: no halal certification, but the menu is essentially meat-free apart from packaged breakfast sandwiches containing pork sausage and bacon, which are sealed and heated in their wrappers. Oat, almond and soy milk available at no charge. Several vegan pastries. Nothing on the espresso line contains meat or alcohol."
+    },
+    {
+      "poi_id": "cafe-X8GJ",
+      "name": "Peet's Coffee",
+      "section": "hours",
+      "text": "Peet's Coffee hours: 4:30am to 9:00pm daily. Located airside in Terminal 1 beside Gate 9A. Roughly a 2 minute walk from Gate 5."
+    },
+
+    {
+      "poi_id": "lounge-MYAS",
+      "name": "Escape Lounge",
+      "section": "overview",
+      "text": "Escape Lounge is the independent pay-in lounge in Terminal 1 near Gate 8A. Hot buffet, self-pour bar, quiet seating, showers, and fast wifi. Walk-up rate is $50; free entry with Priority Pass, Amex Platinum, and select Chase Sapphire Reserve benefits. Capacity is capped and it can be full at peak."
+    },
+    {
+      "poi_id": "lounge-MYAS",
+      "name": "Escape Lounge",
+      "section": "dietary",
+      "text": "Escape Lounge dietary information: the hot buffet is not halal-certified and contains pork items at breakfast. Vegetarian dishes are labelled at the buffet and there is always at least one vegan hot option plus a salad bar. Staff can bring a sealed packaged meal on request with 15 minutes notice. Full self-pour alcohol bar."
+    },
+    {
+      "poi_id": "lounge-MYAS",
+      "name": "Escape Lounge",
+      "section": "hours",
+      "text": "Escape Lounge hours: 5:00am to 10:00pm daily, last entry 9:00pm. Located airside in Terminal 1 near Gate 8A, one level with step-free access. Roughly a 3 minute walk from Gate 5."
+    },
+
+    {
+      "poi_id": "restaurant-NPU0",
+      "name": "Subway",
+      "section": "overview",
+      "text": "Subway is a made-to-order sandwich counter in Terminal 2 near Gate 32. Footlongs, six-inch subs, wraps and salads. Fast — 3-5 minutes. Typical spend $10-15 per person."
+    },
+    {
+      "poi_id": "restaurant-NPU0",
+      "name": "Subway",
+      "section": "dietary",
+      "text": "Subway dietary information: this location is NOT halal-certified. Turkey, roast beef and chicken are standard supply; bacon and pepperoni are on the same line and staff change gloves only on request. Vegetarian (Veggie Delite) and vegan builds are straightforward. No alcohol."
+    },
+    {
+      "poi_id": "restaurant-NPU0",
+      "name": "Subway",
+      "section": "hours",
+      "text": "Subway hours: 5:00am to 9:00pm daily. Located airside in Terminal 2 near Gate 32, a long walk from Terminal 1 — allow 12-15 minutes from Gate 5 via the T1-T2 connector."
+    },
+
+    {
+      "poi_id": "restaurant-9AEI",
+      "name": "Forge Pizza",
+      "section": "overview",
+      "text": "Forge Pizza is an Oakland Jack London Square transplant in Terminal 2 near Gate 30, serving blistered-crust pizza and salads with counter ordering and table delivery. Typical spend $20-28 per person."
+    },
+    {
+      "poi_id": "restaurant-9AEI",
+      "name": "Forge Pizza",
+      "section": "dietary",
+      "text": "Forge Pizza dietary information: not halal-certified; pepperoni, sausage and bacon are on the line and the oven is shared. Strong vegetarian menu including a vegan cashew-cheese pie. Beer and wine served."
+    },
+
+    {
+      "poi_id": "restaurant-U791",
+      "name": "Calavera",
+      "section": "overview",
+      "text": "Calavera is a Oaxacan restaurant and mezcaleria in Terminal 2 near Gate 29, with a full bar and table service. Typical spend $28-40 per person."
+    },
+    {
+      "poi_id": "restaurant-U791",
+      "name": "Calavera",
+      "section": "dietary",
+      "text": "Calavera dietary information: not halal-certified. Pork (cochinita pibil, chorizo) is central to the menu and the grill is shared. Several vegetarian and vegan dishes are marked on the menu. Extensive mezcal and tequila list."
+    },
+
+    {
+      "poi_id": "restaurant-2SVV",
+      "name": "District",
+      "section": "overview",
+      "text": "District is a wine bar and small-plates restaurant in Terminal 2 near Gate 23, with table service and a marble bar. Typical spend $30-45 per person."
+    },
+    {
+      "poi_id": "restaurant-2SVV",
+      "name": "District",
+      "section": "dietary",
+      "text": "District dietary information: not halal-certified. Charcuterie and pork belly feature heavily. Cheese and vegetable plates are the vegetarian route. Wine-forward, alcohol throughout."
+    },
+
+    {
+      "poi_id": "restaurant-5H4P",
+      "name": "Oakland Draft House",
+      "section": "overview",
+      "text": "Oakland Draft House is a taproom and pub-food restaurant in Terminal 2 near Gate 29 with 30 local taps. Typical spend $24-34 per person."
+    },
+    {
+      "poi_id": "restaurant-5H4P",
+      "name": "Oakland Draft House",
+      "section": "dietary",
+      "text": "Oakland Draft House dietary information: not halal-certified. Burgers, wings, pretzels and bratwurst on a shared flat-top and shared fryers. One vegetarian burger. Beer-focused, alcohol throughout."
+    },
+
+    {
+      "poi_id": "restaurant-Y4BZ",
+      "name": "Southie",
+      "section": "overview",
+      "text": "Southie is a sandwich and salad shop in Terminal 2 near Gate 31, from the Oakland original. Counter service, 5-8 minutes. Typical spend $16-22 per person."
+    },
+    {
+      "poi_id": "restaurant-Y4BZ",
+      "name": "Southie",
+      "section": "dietary",
+      "text": "Southie dietary information: not halal-certified; roast pork and bacon sandwiches share the slicer and prep board. Good vegetarian sandwiches and a large salad menu. Beer and wine served."
+    },
+
+    {
+      "poi_id": "cafe-DUJP",
+      "name": "Farley's Cafe",
+      "section": "overview",
+      "text": "Farley's Cafe is an independent Oakland coffeehouse in Terminal 2 near Gate 23, with espresso, drip, pastries and breakfast burritos. Typical spend $7-14 per person."
+    },
+    {
+      "poi_id": "cafe-DUJP",
+      "name": "Farley's Cafe",
+      "section": "dietary",
+      "text": "Farley's Cafe dietary information: no halal certification. Breakfast burritos contain non-halal chorizo and bacon; a vegetarian egg-and-cheese burrito is made on the same griddle. Oat and soy milk available. No alcohol."
+    },
+
+    {
+      "poi_id": "cafe-UMM3",
+      "name": "Oaklandish Coffee Collective",
+      "section": "overview",
+      "text": "Oaklandish Coffee Collective is a local-roaster coffee kiosk in Terminal 1 near Gate 1, pairing espresso with Oaklandish branded merchandise. Typical spend $6-11 per person."
+    },
+    {
+      "poi_id": "cafe-UMM3",
+      "name": "Oaklandish Coffee Collective",
+      "section": "dietary",
+      "text": "Oaklandish Coffee Collective dietary information: drinks and packaged pastries only, no meat prepared on site, so nothing here conflicts with a halal diet though the kiosk holds no certification. Oat and almond milk available. No alcohol."
+    },
+
+    {
+      "poi_id": "security-4RXW",
+      "name": "Terminal 1 Security",
+      "section": "overview",
+      "text": "Terminal 1 Security is the main TSA checkpoint for Terminal 1, with standard lanes, TSA PreCheck, and CLEAR. Typical wait 8-20 minutes at peak, under 5 minutes off-peak. Located landside at the top of the Terminal 1 escalators."
+    }
+  ]
+}

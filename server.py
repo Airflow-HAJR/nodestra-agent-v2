@@ -42,6 +42,8 @@ from agent.config import (
     CARTESIA_VOICE_IDS,
     DEFAULT_AIRPORT,
     DEEPGRAM_API_KEY,
+    DEMO_START_POI,
+    DEMO_USER_ID,
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
     ELEVENLABS_VOICE_IDS,
@@ -522,8 +524,14 @@ def _graph_reply(
     language: str | None = None,
     persist_memory: bool = False,
     user_name: str | None = None,
+    current_location: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"messages": [HumanMessage(content=user_text)]}
+    if current_location:
+        # Only ever passed on a session's first turn — after that the graph's
+        # own current_location is the live one (advance_checkpoint moves it),
+        # and re-sending would teleport the traveler back to the start.
+        payload["current_location"] = current_location
     if user_id:
         payload["user_id"] = user_id
         # Sent every turn, not just the first: signing in mid-conversation flips
@@ -1066,7 +1074,28 @@ async def web_stream(ws: WebSocket):
 
     def _apply_identity() -> None:
         nonlocal user_id
+        if DEMO_USER_ID:
+            user_id = DEMO_USER_ID
+            return
         user_id = account.user_id if account else guest_id
+
+    demo_start_pending = bool(DEMO_START_POI)
+
+    def _consume_demo_start() -> str | None:
+        """DEMO_START_POI, once, on the session's first turn — so a demo opens
+        with "what's nearby?" instead of the agent having to ask where the
+        traveler is standing. Returns None on every turn after that."""
+        nonlocal demo_start_pending
+        if not demo_start_pending:
+            return None
+        demo_start_pending = False
+        return DEMO_START_POI
+
+    def _persist_memory() -> bool:
+        """Whether this session's facts outlive it. Normally that requires a
+        verified account; DEMO_USER_ID forces it on so a demo can show what a
+        returning traveler looks like without a real sign-in."""
+        return bool(DEMO_USER_ID) or account is not None
 
     def _current_greeting() -> str:
         return _greeting_for(
@@ -1268,9 +1297,10 @@ async def web_stream(ws: WebSocket):
                     ctx = contextvars.copy_context()
                     reply = await loop.run_in_executor(
                         _executor,
-                        lambda t=user_text, loc=latest_location, lang=language, acct=account: ctx.run(
+                        lambda t=user_text, loc=latest_location, lang=language, acct=account,
+                               persist=_persist_memory(), start=_consume_demo_start(): ctx.run(
                             _graph_reply, t, session_id, user_id, loc, lang,
-                            acct is not None, acct.first_name if acct else None,
+                            persist, acct.first_name if acct else None, start,
                         )
                     )
             agent_text = reply["text"]
@@ -2076,6 +2106,20 @@ async def _flight_watch_loop():
 
 @app.on_event("startup")
 async def _startup():
+    # Embed the POI knowledge corpus now rather than on whichever traveler
+    # happens to ask the first "what's around here?" — it's a few seconds cold,
+    # and it's cached to disk, so on a restart this is a no-op. Off the event
+    # loop because it's a blocking HTTP call to the embedding endpoint.
+    from agent.poi_rag import warm_index
+    asyncio.get_running_loop().run_in_executor(None, warm_index)
+
+    if DEMO_USER_ID:
+        logger.warning(
+            "DEMO MODE: every web session is being served as user %s with durable memory on, "
+            "signed in or not. This bypasses authentication — unset DEMO_USER_ID before deploying.",
+            DEMO_USER_ID,
+        )
+
     if os.environ.get("FLIGHT_TRACKER_ENABLED", "false").lower() == "true":
         asyncio.create_task(_flight_watch_loop())
     else:

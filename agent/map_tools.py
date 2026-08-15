@@ -301,6 +301,45 @@ def show_map_directions(
     return f"Directions shown on map to {destination_name}."
 
 
+class ShowOptionsInput(BaseModel):
+    poi_ids: list[str] = Field(description="POI ids of the places to pin, in the order you'll talk about them")
+    names: list[str] = Field(description="Display name for each place (same order as poi_ids)")
+    notes: Optional[list[str]] = Field(
+        default=None,
+        description="Optional one-line caption per place (same order), e.g. '3 min · halal-certified'",
+    )
+
+
+@tool(args_schema=ShowOptionsInput)
+def show_map_options(poi_ids: list[str], names: list[str], notes: Optional[list[str]] = None) -> str:
+    """Pin several candidate places on the user's map at once — use this when
+    you're presenting a choice ("here are three places to eat"), not a route.
+
+    Unlike show_map_destination (one pin) or show_map_trajectory (a path), this
+    draws no line: the places aren't stops on a walk, they're alternatives.
+    Call it once with all the options, then talk through them in the same
+    order. If you later narrow to one, call navigate() for that one."""
+    print("[map] show_options")
+    resolved: list[dict] = []
+    for i, poi_id in enumerate(poi_ids):
+        gps = _lookup_gps(poi_id)
+        if not gps:
+            continue
+        resolved.append({
+            "poiId": poi_id,
+            "name": names[i] if i < len(names) else gps.get("name", poi_id),
+            "lat": gps["lat"],
+            "lng": gps["lng"],
+            "note": (notes[i] if notes and i < len(notes) else None),
+        })
+
+    if not resolved:
+        return "No GPS coordinates available for any of those places."
+
+    _emit({"type": "show_options", "options": resolved})
+    return f"Map updated — showing {len(resolved)} options: " + ", ".join(o["name"] for o in resolved) + "."
+
+
 class ShowRouteInput(BaseModel):
     stops: list[str] = Field(
         description="Ordered list of POI ids along the route (from get_route stops)"
@@ -626,6 +665,7 @@ def clear_map() -> str:
 
 MAP_TOOLS = [
     show_map_destination,
+    show_map_options,
     show_map_directions,
     show_map_route,
     show_map_trajectory,

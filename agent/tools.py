@@ -252,6 +252,246 @@ def find_nearest(source: str, poi_type: str, airport_id: str = DEFAULT_AIRPORT, 
 
 
 # ---------------------------------------------------------------------------
+# POI knowledge (retrieval) tools
+#
+# find_nearest tells you which place is closest; these tell you what the place
+# actually is. Both read from agent/poi_rag.py, which embeds a corpus of venue
+# write-ups and returns the passages that matched — the agent answers from
+# those passages, and says so when nothing matched, rather than from its own
+# impression of a restaurant name.
+# ---------------------------------------------------------------------------
+
+# Memory categories that can disqualify a venue rather than merely colour the
+# recommendation. "travel" (favorite airline) and "personal" don't belong here —
+# they don't make a restaurant wrong, so checking them against a menu would just
+# burn a turn.
+_CONSTRAINING_CATEGORIES = {"dietary", "accessibility", "preference", "payment"}
+
+
+def _format_constraint(m: dict) -> str:
+    meta = m.get("metadata") or {}
+    content = (m.get("content") or "").strip()
+    if isinstance(meta, dict) and meta.get("source"):
+        where = " at " + str(meta["airport"]) if meta.get("airport") else ""
+        when = " on " + str(meta["date"]) if meta.get("date") else ""
+        return f"{content} — learned {meta['source']}{where}{when}"
+    return content
+
+
+class SuggestPlacesInput(BaseModel):
+    need: str = Field(
+        description="What the user is after in their own words, e.g. 'hungry, something quick', "
+                    "'sit-down dinner', 'coffee', 'a quiet place to work'"
+    )
+    poi_type: str = Field(
+        default="restaurant",
+        description="Category to rank by walking distance: 'restaurant'|'cafe'|'lounge'|'shop'|'bookstore'",
+    )
+    source: Optional[str] = Field(
+        default=None,
+        description="POI id to measure walking distance from. Omit to use the user's current_location.",
+    )
+    limit: int = Field(default=3, description="How many options to return (2-4 reads best out loud)")
+    airport_id: str = Field(default=DEFAULT_AIRPORT)
+
+
+@tool(args_schema=SuggestPlacesInput)
+def suggest_places(
+    need: str,
+    state: Annotated[dict, InjectedState],
+    poi_type: str = "restaurant",
+    source: Optional[str] = None,
+    limit: int = 3,
+    airport_id: str = DEFAULT_AIRPORT,
+) -> dict:
+    """Find several nearby places of a category and describe each one.
+
+    Use this — not find_nearest — whenever the user wants OPTIONS rather than
+    one destination ("I'm hungry, what's nearby?", "anywhere to get coffee?").
+    It ranks candidates by real walking distance from the user, attaches a
+    retrieved description of each, AND pins them all on the user's map, so you
+    do not need to call show_map_options yourself.
+
+    Returns one entry per option with its poi_id — pass those ids to
+    lookup_poi_info to check them against a specific requirement, and to
+    navigate() once the user picks one. Describe each option out loud using
+    only the 'about' text returned here.
+    """
+    print("[suggest_places]")
+    from agent.map_tools import show_map_options
+    from agent import poi_rag
+
+    levels = load_map_levels(airport_id)
+    src = source or state.get("current_location")
+    if not src:
+        return {
+            "found": False,
+            "message": "I don't know where the user is yet — ask them which gate or area they're near, then call this again.",
+        }
+    if not any(p["id"] == src for lvl in levels for p in lvl["pois"]):
+        return {"found": False, "message": f"Source POI '{src}' not found — call find_poi to get a valid id."}
+
+    matched_types = matching_poi_types(poi_type, levels)
+    if not matched_types:
+        return {"found": False, "message": f"No POIs of type '{poi_type}' at this airport."}
+
+    scored: list[tuple[float, dict, str]] = []
+    for lvl in levels:
+        for p in lvl["pois"]:
+            if p["id"] == src or (p.get("type") or "").lower().strip() not in matched_types:
+                continue
+            route = dijkstra_multilevel(levels, src, p["id"])
+            if route is None:
+                continue
+            scored.append((route["distance"], p, lvl["name"]))
+
+    if not scored:
+        return {"found": False, "message": f"Nothing of type '{poi_type}' is reachable from there."}
+
+    scored.sort(key=lambda t: t[0])
+    limit = max(1, min(limit, 5))
+
+    # Which of the nearby candidates to surface is half "does this match what
+    # they asked for" and half "is it actually close". Relevance alone sends a
+    # hungry traveler to the far end of the other terminal; distance alone
+    # ignores what they said they wanted. Both are min-max normalized within
+    # the candidate pool before being averaged, because raw cosine scores sit
+    # in a narrow band and would otherwise be swamped by the distance term.
+    pool = scored[: limit * 3]
+    pool_ids = [p["id"] for _, p, _ in pool]
+    ranked = poi_rag.search(need, poi_ids=pool_ids, top_k=len(pool) * 4)
+    relevance: dict[str, float] = {}
+    for hit in ranked:
+        relevance[hit["poi_id"]] = max(relevance.get(hit["poi_id"], 0.0), hit["score"])
+
+    def _normalize(values: dict[str, float]) -> dict[str, float]:
+        if not values:
+            return {}
+        lo, hi = min(values.values()), max(values.values())
+        span = hi - lo
+        return {k: (1.0 if span == 0 else (v - lo) / span) for k, v in values.items()}
+
+    rel_n = _normalize(relevance)
+    prox_n = _normalize({p["id"]: -d for d, p, _ in pool})  # negated: closer scores higher
+    combined = sorted(
+        pool_ids,
+        key=lambda pid: 0.5 * rel_n.get(pid, 0.0) + 0.5 * prox_n.get(pid, 0.0),
+        reverse=True,
+    )[:limit]
+    by_id = {p["id"]: (d, p, lvl) for d, p, lvl in pool}
+    # Presented nearest-first even though relevance chose the set: the walking
+    # time is the thing the user compares options on out loud.
+    picked = sorted((by_id[pid] for pid in combined), key=lambda t: t[0]) or scored[:limit]
+
+    options = []
+    for distance, poi, level_name in picked:
+        about = poi_rag.summarize_poi(poi["id"])
+        options.append({
+            "poi_id": poi["id"],
+            "name": poi.get("name") or poi_type.capitalize(),
+            "type": poi.get("type", ""),
+            "level": level_name,
+            "walk_minutes": max(1, round(distance * 10)),
+            "about": about or "No description on file — say you don't have details for this one.",
+        })
+
+    show_map_options.invoke({
+        "poi_ids": [o["poi_id"] for o in options],
+        "names": [o["name"] for o in options],
+        "notes": [f"{o['walk_minutes']} min walk" for o in options],
+    })
+
+    result: dict = {
+        "found": True,
+        "options": options,
+        "map": "All options are now pinned on the user's map — no further map call needed.",
+    }
+
+    # A remembered constraint is only worth remembering if it changes what the
+    # user is offered. Rather than hoping the agent connects "eats halal" to
+    # three restaurants it has just been handed, the shortlist itself carries
+    # the constraint back out with the ids to check it against — the retrieval
+    # step becomes the obvious next move instead of an easily-skipped one.
+    constraining = [
+        m for m in (state.get("user_memories") or [])
+        if (m.get("category") or "") in _CONSTRAINING_CATEGORIES
+    ]
+    if constraining:
+        result["must_check_first"] = {
+            "instruction": (
+                "You already know things about this user that could rule some of these out. "
+                "BEFORE you recommend one: call lookup_poi_info with poi_ids set to ALL of the ids "
+                "above and a question phrased from the preferences below (e.g. 'is the meat halal "
+                "certified?'). Then, in this order and out loud: (1) name where the preference came "
+                "from, using the 'learned' detail below — 'last time you came through OAK you were "
+                "checking whether places were halal, so I checked all three'; (2) give the verdict "
+                "for EVERY option, the failures included, in one short sentence each; (3) recommend "
+                "the one that passed. Never silently drop an option — the user should hear why it's "
+                "out. Plain speech only, no lists or markdown."
+            ),
+            "preferences": [_format_constraint(m) for m in constraining],
+            "poi_ids": [o["poi_id"] for o in options],
+        }
+
+    return result
+
+
+class LookupPOIInfoInput(BaseModel):
+    question: str = Field(
+        description="The specific thing to check, e.g. 'is the meat halal certified?', "
+                    "'vegan options', 'what time does it close?', 'is there alcohol?'"
+    )
+    poi_ids: Optional[List[str]] = Field(
+        default=None,
+        description="POI ids to check. Pass ALL the candidates when comparing them; "
+                    "omit to search every venue on file.",
+    )
+
+
+@tool(args_schema=LookupPOIInfoInput)
+def lookup_poi_info(question: str, poi_ids: Optional[List[str]] = None) -> dict:
+    """Look up what's actually known about specific venues — menu, dietary and
+    halal information, hours, price, alcohol, accessibility.
+
+    This is the ONLY source you have for these details. Never answer a "does
+    this place have X" question from your own knowledge of a restaurant or
+    chain — call this, then answer from the passages it returns, and say
+    plainly that you don't know when it returns nothing.
+
+    Pass every candidate's poi_id at once when the user's requirement has to be
+    checked against several places (a diet, an allergy, a closing time): each
+    venue is retrieved separately, so every one of them comes back with its own
+    evidence instead of the strongest match drowning out the others.
+    """
+    print(f"[lookup_poi_info] {question!r} over {poi_ids or 'all POIs'}")
+    from agent import poi_rag
+
+    hits = poi_rag.search(
+        question,
+        poi_ids=poi_ids,
+        top_k=2 if poi_ids else 5,
+        per_poi=bool(poi_ids),
+    )
+    if not hits:
+        return {
+            "found": False,
+            "message": "Nothing on file about that. Tell the user you don't have the details rather than guessing.",
+        }
+
+    by_poi: dict[str, dict] = {}
+    for h in hits:
+        entry = by_poi.setdefault(h["poi_id"], {"poi_id": h["poi_id"], "name": h["name"], "evidence": []})
+        entry["evidence"].append({"section": h.get("section", ""), "text": h["text"], "score": h["score"]})
+
+    return {
+        "found": True,
+        "question": question,
+        "results": list(by_poi.values()),
+        "instruction": "Answer only from these passages. If a venue's passages don't settle the question, say so for that venue.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # State tool (LangGraph only — not a navigation API call)
 # ---------------------------------------------------------------------------
 
@@ -639,6 +879,8 @@ def navigate(
 
 TOOLS = [
     navigate,
+    suggest_places,
+    lookup_poi_info,
     find_poi,
     get_route,
     get_nodes,

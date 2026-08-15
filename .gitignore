@@ -17,3 +17,8 @@ wheels/
 
 # ChromaDB vector store (local, regenerated on first run)
 .chroma_db/
+
+# POI embedding index — a ~1MB derived artifact, rebuilt from
+# data/poi_knowledge.json on first run (and automatically whenever that file
+# or the embedding model changes).
+data/poi_index.json

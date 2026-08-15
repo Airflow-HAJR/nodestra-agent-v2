@@ -1,5 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Iterator, Literal
@@ -10,7 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from agent.config import MEMORY_ENABLED
+from agent.config import DEFAULT_AIRPORT, MEMORY_ENABLED
 from agent.llm import build_llm
 from agent.prompts import build_system_prompt
 from agent.state import State
@@ -353,6 +354,14 @@ def _extract_and_persist(config: dict, state: dict) -> None:
 
     cached = list(state.get("user_memories") or [])
     saved = 0
+    # Where and when the fact was picked up, stored alongside it. The prompt
+    # renders this back as "(learned: ...)" so the agent can attribute what it
+    # knows on a later trip instead of just knowing it.
+    provenance = {
+        "source": "said in conversation",
+        "airport": DEFAULT_AIRPORT,
+        "date": date.today().isoformat(),
+    }
     for fact in result.facts:
         content = (fact.content or "").strip()
         if not content or is_duplicate(cached, content):
@@ -361,10 +370,10 @@ def _extract_and_persist(config: dict, state: dict) -> None:
         row = None
         if persist:
             try:
-                row = vm_add_memory(user_id, content, category)
+                row = vm_add_memory(user_id, content, category, provenance)
             except Exception as e:
                 print(f"[memory: DB write failed — {e}]")
-        cached.append(row or {"id": None, "content": content, "category": category, "metadata": {}})
+        cached.append(row or {"id": None, "content": content, "category": category, "metadata": provenance})
         saved += 1
         print(f"[memory: saved ({category}, {'db' if row else 'session'}) — {content!r}]")
 
@@ -632,7 +641,12 @@ def _init_node(state: State) -> dict:
         if not is_duplicate(memories, m.get("content") or "")
     ]
     for m in carried:
-        row = vm_add_memory(user_id, m.get("content") or "", m.get("category") or "other")
+        row = vm_add_memory(
+            user_id,
+            m.get("content") or "",
+            m.get("category") or "other",
+            m.get("metadata") or None,
+        )
         if row:
             memories.append(row)
     if carried:

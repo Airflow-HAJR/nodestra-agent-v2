@@ -5,15 +5,18 @@ Two tiers:
   build_llm(fast=True)   -> small/fast model for helper nodes (intent, recall,
                             save, summary) where quality matters less than speed
 
+Plus build_embeddings() for the POI retrieval index (agent/poi_rag.py).
+
 Provider is chosen by LLM_PROVIDER ("openai" default, or "azure").
 """
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings, ChatOpenAI, OpenAIEmbeddings
 from pydantic import SecretStr
 
 from agent.config import (
     AZURE_OPENAI_API_KEY,
     AZURE_OPENAI_API_VERSION,
     AZURE_OPENAI_DEPLOYMENT,
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
     AZURE_OPENAI_ENDPOINT,
     GROQ_API_KEY,
     GROQ_BASE_URL,
@@ -22,8 +25,45 @@ from agent.config import (
     OPENAI_API_KEY,
     OPENAI_MAIN_REASONING_EFFORT,
     OPENAI_MODEL_FAST,
+    OPENAI_EMBEDDING_MODEL,
     OPENAI_MODEL_MAIN,
 )
+
+_embeddings = None
+
+
+def embedding_model_name() -> str:
+    """Which embedding model retrieval will use, or "" if none is configured.
+
+    Returned (rather than inferred inside build_embeddings) because the POI
+    index cache is keyed by it: swapping models has to invalidate vectors that
+    are no longer comparable."""
+    if LLM_PROVIDER == "azure":
+        return AZURE_OPENAI_EMBEDDING_DEPLOYMENT if AZURE_OPENAI_API_KEY else ""
+    return OPENAI_EMBEDDING_MODEL if OPENAI_API_KEY else ""
+
+
+def build_embeddings():
+    """Embedding model for POI retrieval, or None when none is configured —
+    retrieval falls back to keyword matching rather than failing."""
+    global _embeddings
+    if _embeddings is not None:
+        return _embeddings
+    if not embedding_model_name():
+        return None
+    if LLM_PROVIDER == "azure":
+        _embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=SecretStr(AZURE_OPENAI_API_KEY),
+            api_version=AZURE_OPENAI_API_VERSION,
+        )
+    else:
+        _embeddings = OpenAIEmbeddings(
+            model=OPENAI_EMBEDDING_MODEL,
+            api_key=SecretStr(OPENAI_API_KEY),
+        )
+    return _embeddings
 
 
 def build_llm(fast: bool = False):

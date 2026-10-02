@@ -1,4 +1,12 @@
-ALL CODE IS DISTRIBUTED ON THIS ORGANIZATION's 3 REPOSITORIES. See the other two repositories in this organization for the hydration layer built with MOSS and the custom map builder we created to provide an indoor map of OAK airport to the agent.
+Nodestra is split across several repositories in this organization:
+
+- [nodestra-agent-v2](https://github.com/Airflow-HAJR/nodestra-agent-v2) — this repo, the voice/phone agent
+- [nodestra-agent-ui](https://github.com/Airflow-HAJR/nodestra-agent-ui) — browser front end (orb, transcript, indoor map)
+- [nodestra-mapbuilder](https://github.com/Airflow-HAJR/nodestra-mapbuilder) — custom map builder for the indoor OAK map the agent navigates
+- [nodestra-gategetter](https://github.com/Airflow-HAJR/nodestra-gategetter) — airport ops dashboard for flights and passengers
+- [nodestra-analytics](https://github.com/Airflow-HAJR/nodestra-analytics) — dashboard over agent calls and turns
+- [nodestra-signin](https://github.com/Airflow-HAJR/nodestra-signin) — sign-in for the operator tools
+- [nodestra-landing](https://github.com/Airflow-HAJR/nodestra-landing) — nodestra.com
 
 AI airport navigation assistant with phone support over Twilio voice + SMS.
 
